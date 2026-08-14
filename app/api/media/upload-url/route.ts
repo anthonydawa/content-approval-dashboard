@@ -1,7 +1,6 @@
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { createHmac, randomUUID } from "node:crypto";
 
-const MAX_MEDIA_BYTES = 250 * 1024 * 1024;
+const MAX_MEDIA_BYTES = 90 * 1024 * 1024;
 const EXTENSIONS: Record<string, string> = {
   "image/jpeg": "jpg",
   "image/png": "png",
@@ -17,15 +16,12 @@ function cleanId(value: string) {
 }
 
 export async function POST(request: Request) {
-  const accountId = process.env.R2_ACCOUNT_ID;
-  const accessKeyId = process.env.R2_ACCESS_KEY_ID;
-  const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY;
-  const bucket = process.env.R2_BUCKET_NAME;
-  const publicBaseUrl = process.env.R2_PUBLIC_URL?.replace(/\/$/, "");
+  const mediaWorkerUrl = process.env.MEDIA_WORKER_URL?.replace(/\/$/, "");
+  const signingSecret = process.env.UPLOAD_SIGNING_SECRET;
 
-  if (!accountId || !accessKeyId || !secretAccessKey || !bucket || !publicBaseUrl) {
+  if (!mediaWorkerUrl || !signingSecret) {
     return Response.json(
-      { error: "Cloudflare R2 is not configured yet.", code: "r2_not_configured" },
+      { error: "Cloudflare media storage is not configured yet.", code: "media_not_configured" },
       { status: 503 },
     );
   }
@@ -46,20 +42,17 @@ export async function POST(request: Request) {
     return Response.json({ error: "This file type is not supported." }, { status: 400 });
   }
   if (!Number.isFinite(body.size) || (body.size ?? 0) <= 0 || (body.size ?? 0) > MAX_MEDIA_BYTES) {
-    return Response.json({ error: "Files must be 250 MB or smaller." }, { status: 400 });
+    return Response.json({ error: "Files must be 90 MB or smaller." }, { status: 400 });
   }
 
-  const key = `${workspaceId}/${contentId}-${Date.now()}-${crypto.randomUUID()}.${extension}`;
-  const client = new S3Client({
-    region: "auto",
-    endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
-    credentials: { accessKeyId, secretAccessKey },
-  });
-  const command = new PutObjectCommand({ Bucket: bucket, Key: key, ContentType: contentType });
-  const uploadUrl = await getSignedUrl(client, command, { expiresIn: 300 });
+  const key = `${workspaceId}/${contentId}-${Date.now()}-${randomUUID()}.${extension}`;
+  const expires = Math.floor(Date.now() / 1000) + 300;
+  const signature = createHmac("sha256", signingSecret).update(`${key}:${expires}`).digest("hex");
+  const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+  const uploadUrl = `${mediaWorkerUrl}/upload/${encodedKey}?expires=${expires}&signature=${signature}`;
 
   return Response.json(
-    { uploadUrl, publicUrl: `${publicBaseUrl}/${key}` },
+    { uploadUrl, publicUrl: `${mediaWorkerUrl}/media/${encodedKey}` },
     { headers: { "Cache-Control": "no-store" } },
   );
 }

@@ -1,0 +1,29 @@
+/* Review media at its complete natural proportions instead of cropping it. */
+.card-grid {
+  min-height: 0;
+  align-items: start;
+}
+
+.media-wrap {
+  min-height: 0;
+  height: auto;
+  align-self: start;
+}
+
+.media-wrap img,
+.media-wrap video {
+  display: block;
+  width: 100%;
+  height: auto;
+  position: relative;
+  inset: auto;
+  object-fit: contain;
+}
+
+@media (max-width: 900px) {
+  .media-wrap { min-height: 0; }
+}
+
+@media (max-width: 680px) {
+  .media-wrap { height: auto; min-height: 0; }
+}
