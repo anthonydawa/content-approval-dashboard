@@ -20,10 +20,28 @@
   object-fit: contain;
 }
 
+/* Keep asset controls beside the approval actions so they never obscure artwork. */
+.replace-button {
+  position: static;
+  left: auto;
+  bottom: auto;
+  height: 40px;
+  padding: 0 13px;
+  border: 1px solid #dcddd7;
+  border-radius: 9px;
+  background: #fff;
+  color: #4b5954;
+  font-size: 11px;
+  font-weight: 800;
+  backdrop-filter: none;
+}
+
 @media (max-width: 900px) {
   .media-wrap { min-height: 0; }
 }
 
 @media (max-width: 680px) {
   .media-wrap { height: auto; min-height: 0; }
+
+  .replace-button { flex: 1; }
 }

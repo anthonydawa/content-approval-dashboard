@@ -666,9 +666,6 @@ function ContentCard({
               <span>Add it whenever the asset is ready.</span>
             </div>
           )}
-          <button className="replace-button" onClick={onReplace}>
-            <ImagePlus size={15} /> Replace media
-          </button>
         </div>
         <div className="post-details">
           <div className="meta-row">
@@ -681,6 +678,9 @@ function ContentCard({
           <div className="caption-label">Caption</div>
           <p className="caption">{item.caption}</p>
           <div className="review-actions">
+            <button className="replace-button" onClick={onReplace}>
+              <ImagePlus size={15} /> Replace media
+            </button>
             <button
               className={`approve-button ${approved ? "approved" : ""}`}
               onClick={onApprove}
