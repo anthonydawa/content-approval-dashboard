@@ -34,11 +34,13 @@ create table if not exists public.comments (
 );
 
 alter table public.workspaces
-  add column if not exists timezone text not null default 'Asia/Manila',
+  add column if not exists timezone text not null default 'America/Chicago',
   add column if not exists zernio_api_key_encrypted text,
   add column if not exists zernio_accounts jsonb not null default '[]'::jsonb,
   add column if not exists auto_queue_cadence jsonb not null default
     '{"frequency":"weekdays","weekdays":[1,2,3,4,5],"times":["09:00"],"start_date":""}'::jsonb;
+
+alter table public.workspaces alter column timezone set default 'America/Chicago';
 
 create table if not exists public.schedule_queue (
   id uuid primary key default gen_random_uuid(),
@@ -163,6 +165,11 @@ drop policy if exists "public media reads" on storage.objects;
 drop policy if exists "testing media selects" on storage.objects;
 drop policy if exists "testing media updates" on storage.objects;
 drop policy if exists "testing media uploads" on storage.objects;
+
+-- Existing workspaces use Central Time for the Texas scheduler by default.
+update public.workspaces
+set timezone = 'America/Chicago'
+where timezone is null or timezone = 'Asia/Manila';
 
 -- The deployment applies these three statements with a generated hash:
 -- insert into private.app_settings(singleton, data_api_key_sha256)

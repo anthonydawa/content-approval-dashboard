@@ -25,16 +25,53 @@ type Props = {
 };
 
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const DEFAULT_TIMEZONE = "America/Chicago";
 
-function localInputValue(value: string | null) {
+function localInputValue(value: string | null, timezone = DEFAULT_TIMEZONE) {
   if (!value) return "";
-  const date = new Date(value);
-  const offset = date.getTimezoneOffset() * 60_000;
-  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(value));
+  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? "00";
+  return `${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}`;
+}
+
+function workspaceDateTimeToIso(value: string, timezone: string) {
+  const [datePart, timePart] = value.split("T");
+  const [year, month, day] = datePart.split("-").map(Number);
+  const [hour, minute] = timePart.split(":").map(Number);
+  const wallClock = Date.UTC(year, month - 1, day, hour, minute);
+  let guess = wallClock;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(new Date(guess));
+    const get = (type: string) => Number(parts.find((part) => part.type === type)?.value ?? 0);
+    const displayed = Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second"));
+    guess = wallClock - (displayed - guess);
+  }
+  return new Date(guess).toISOString();
 }
 
 function dateKey(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function dateKeyUtc(date: Date) {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
 }
 
 function calendarDays(month: Date) {
@@ -68,7 +105,7 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
 
   async function saveSchedule(item: QueueItem, value: string) {
     if (!value) return;
-    await apiRequest("updateQueueSchedule", { id: item.id, scheduledAt: new Date(value).toISOString() });
+    await apiRequest("updateQueueSchedule", { id: item.id, scheduledAt: workspaceDateTimeToIso(value, workspace.timezone || DEFAULT_TIMEZONE) });
     await onChanged();
     flash(item.zernio_post_id ? "Schedule changed — resend it to Zernio when ready" : "Schedule saved");
   }
@@ -141,9 +178,9 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
           <p>Select posts in Approval and move them into this scheduling queue.</p>
         </div>
       ) : mode === "queue" ? (
-        <QueueList queue={queue} onSave={saveSchedule} onDelete={setDeleteItem} />
+        <QueueList queue={queue} timezone={workspace.timezone || DEFAULT_TIMEZONE} onSave={saveSchedule} onDelete={setDeleteItem} />
       ) : (
-        <CalendarGrid monthItems={queue} onMove={saveSchedule} />
+        <CalendarGrid monthItems={queue} timezone={workspace.timezone || DEFAULT_TIMEZONE} onMove={saveSchedule} />
       )}
 
       {autoOpen && (
@@ -168,8 +205,9 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
   );
 }
 
-function QueueList({ queue, onSave, onDelete }: {
+function QueueList({ queue, timezone, onSave, onDelete }: {
   queue: QueueItem[];
+  timezone: string;
   onSave: (item: QueueItem, value: string) => Promise<void>;
   onDelete: (item: QueueItem) => void;
 }) {
@@ -197,9 +235,9 @@ function QueueList({ queue, onSave, onDelete }: {
             <span><Clock3 size={14} /> Date and time</span>
             <input
               type="datetime-local"
-              defaultValue={localInputValue(item.scheduled_at)}
+              defaultValue={localInputValue(item.scheduled_at, timezone)}
               onBlur={(event) => {
-                if (event.target.value && event.target.value !== localInputValue(item.scheduled_at)) void onSave(item, event.target.value);
+                if (event.target.value && event.target.value !== localInputValue(item.scheduled_at, timezone)) void onSave(item, event.target.value);
               }}
             />
           </label>
@@ -212,8 +250,9 @@ function QueueList({ queue, onSave, onDelete }: {
   );
 }
 
-function CalendarGrid({ monthItems, onMove }: {
+function CalendarGrid({ monthItems, timezone, onMove }: {
   monthItems: QueueItem[];
+  timezone: string;
   onMove: (item: QueueItem, value: string) => Promise<void>;
 }) {
   const firstScheduled = monthItems.find((item) => item.scheduled_at)?.scheduled_at;
@@ -226,18 +265,18 @@ function CalendarGrid({ monthItems, onMove }: {
     const map = new Map<string, QueueItem[]>();
     for (const item of monthItems) {
       if (!item.scheduled_at) continue;
-      const key = dateKey(new Date(item.scheduled_at));
+      const key = localInputValue(item.scheduled_at, timezone).slice(0, 10);
       map.set(key, [...(map.get(key) ?? []), item]);
     }
     return map;
-  }, [monthItems]);
+  }, [monthItems, timezone]);
 
   async function dropOn(itemId: string, day: Date) {
     const item = monthItems.find((entry) => entry.id === itemId);
     if (!item?.scheduled_at) return;
-    const current = new Date(item.scheduled_at);
-    const moved = new Date(day.getFullYear(), day.getMonth(), day.getDate(), current.getHours(), current.getMinutes());
-    await onMove(item, localInputValue(moved.toISOString()));
+    const current = localInputValue(item.scheduled_at, timezone);
+    const moved = `${dateKey(day)}T${current.slice(11, 16)}`;
+    await onMove(item, moved);
   }
 
   return (
@@ -269,7 +308,7 @@ function CalendarGrid({ monthItems, onMove }: {
                     onDragStart={(event) => event.dataTransfer.setData("text/queue-id", item.id)}
                     title={`${queueTitle(item)} · ${syncLabel(item)}`}
                   >
-                    <strong>{new Date(item.scheduled_at!).toLocaleTimeString("en", { hour: "numeric", minute: "2-digit" })}</strong>
+                    <strong>{new Date(item.scheduled_at!).toLocaleTimeString("en", { timeZone: timezone, hour: "numeric", minute: "2-digit" })}</strong>
                     <span>{queueTitle(item)}</span>
                     <small>{syncLabel(item)}</small>
                   </article>
@@ -307,22 +346,24 @@ function AutoQueueModal({ workspace, queue, onClose, onChanged, flash }: {
     if (!parsedTimes.length) throw new Error("Enter at least one time like 09:00.");
     const allowed = frequency === "daily" ? [0,1,2,3,4,5,6] : frequency === "weekdays" ? [1,2,3,4,5] : weekdays;
     if (!allowed.length) throw new Error("Choose at least one posting day.");
-    const occupied = new Set(queue.filter((item) => item.scheduled_at).map((item) => localInputValue(item.scheduled_at).slice(0, 16)));
+    const timezone = workspace.timezone || DEFAULT_TIMEZONE;
+    const occupied = new Set(queue.filter((item) => item.scheduled_at).map((item) => localInputValue(item.scheduled_at, timezone).slice(0, 16)));
     const assignments: Array<{ id: string; scheduledAt: string }> = [];
-    const cursor = new Date(`${startDate}T00:00:00`);
+    const cursor = new Date(`${startDate}T00:00:00Z`);
     let guard = 0;
     while (assignments.length < unscheduled.length && guard < 3700) {
-      if (allowed.includes(cursor.getDay())) {
+      if (allowed.includes(cursor.getUTCDay())) {
         for (const time of parsedTimes) {
-          const candidate = `${dateKey(cursor)}T${time}`;
-          if (new Date(candidate).getTime() > Date.now() && !occupied.has(candidate)) {
-            assignments.push({ id: unscheduled[assignments.length].id, scheduledAt: new Date(candidate).toISOString() });
+          const candidate = `${dateKeyUtc(cursor)}T${time}`;
+          const candidateIso = workspaceDateTimeToIso(candidate, timezone);
+          if (new Date(candidateIso).getTime() > Date.now() && !occupied.has(candidate)) {
+            assignments.push({ id: unscheduled[assignments.length].id, scheduledAt: candidateIso });
             occupied.add(candidate);
             if (assignments.length === unscheduled.length) break;
           }
         }
       }
-      cursor.setDate(cursor.getDate() + 1);
+      cursor.setUTCDate(cursor.getUTCDate() + 1);
       guard += 1;
     }
     return { assignments, cadence: { frequency, weekdays, times: parsedTimes, start_date: startDate } satisfies QueueCadence };
@@ -354,7 +395,7 @@ function ZernioSettingsModal({ workspace, onClose, onChanged, flash }: {
   workspace: Workspace; onClose: () => void; onChanged: () => Promise<void>; flash: (message: string) => void;
 }) {
   const [apiKey, setApiKey] = useState("");
-  const [timezone, setTimezone] = useState(workspace.timezone || "Asia/Manila");
+  const [timezone, setTimezone] = useState(workspace.timezone || DEFAULT_TIMEZONE);
   const [accounts, setAccounts] = useState<ZernioAccount[]>(workspace.zernio_accounts);
   const [selected, setSelected] = useState(workspace.zernio_accounts.map((account) => account.id));
   const [busy, setBusy] = useState(false);
@@ -378,7 +419,7 @@ function ZernioSettingsModal({ workspace, onClose, onChanged, flash }: {
       finally { setBusy(false); }
     }}>
       <label>Zernio API key <small>{workspace.zernio_configured ? "Leave blank to keep the stored key" : "Required"}</small><input type="password" autoComplete="off" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={workspace.zernio_configured ? "Stored securely" : "sk_…"} /></label>
-      <label>Workspace timezone<input value={timezone} onChange={(event) => setTimezone(event.target.value)} placeholder="Asia/Manila" /></label>
+      <label>Workspace timezone<input value={timezone} onChange={(event) => setTimezone(event.target.value)} placeholder="America/Chicago" /></label>
       <button type="button" className="secondary-button load-accounts" disabled={busy || (!apiKey && !workspace.zernio_configured)} onClick={load}>{busy ? "Checking…" : "Load connected accounts"}</button>
       {accounts.length > 0 && <div className="account-picker">{accounts.map((account) => <label key={account.id}><input type="checkbox" aria-label={`Use ${account.display_name || account.username || account.platform}`} checked={selected.includes(account.id)} onChange={() => setSelected((current) => current.includes(account.id) ? current.filter((id) => id !== account.id) : [...current, account.id])} /><span><strong>{account.display_name || account.username || account.platform}</strong><small>{account.platform}{account.username ? ` · ${account.username}` : ""}</small></span></label>)}</div>}
       <p className="modal-hint">Only posts created by this dashboard are tracked or updated. Existing Zernio calendar posts are never modified.</p>

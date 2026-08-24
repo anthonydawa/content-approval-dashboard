@@ -7,6 +7,7 @@ import { getZernioPost, listZernioAccounts, syncZernioPost } from "@/lib/server/
 import type { QueueCadence, QueueItem, Workspace, ZernioAccount } from "@/lib/types";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const DEFAULT_TIMEZONE = "America/Chicago";
 const DEFAULT_CADENCE: QueueCadence = { frequency: "weekdays", weekdays: [1, 2, 3, 4, 5], times: ["09:00"], start_date: "" };
 
 function id(value: unknown, name = "id") {
@@ -69,7 +70,7 @@ function workspaceDto(row: Record<string, unknown>): Workspace {
     name: String(row.name ?? ""),
     initials: String(row.initials ?? ""),
     color: String(row.color ?? "#536f62"),
-    timezone: String(row.timezone ?? "Asia/Manila"),
+    timezone: String(row.timezone ?? DEFAULT_TIMEZONE),
     zernio_configured: Boolean(row.zernio_api_key_encrypted),
     zernio_accounts: Array.isArray(row.zernio_accounts) ? (row.zernio_accounts as ZernioAccount[]) : [],
     auto_queue_cadence: row.auto_queue_cadence && typeof row.auto_queue_cadence === "object"
@@ -116,7 +117,7 @@ export async function POST(request: Request) {
         name,
         initials: name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase(),
         color: /^#[0-9a-f]{6}$/i.test(color) ? color : "#536f62",
-        timezone: "Asia/Manila",
+        timezone: DEFAULT_TIMEZONE,
       };
       const { error } = await supabase.from("workspaces").insert(row);
       if (error) throw error;
@@ -253,7 +254,7 @@ export async function POST(request: Request) {
     if (action === "saveZernioConfig") {
       const workspaceId = id(body.workspaceId, "workspace ID");
       const suppliedKey = text(body.apiKey, 200);
-      const timezone = text(body.timezone, 80, "Asia/Manila");
+      const timezone = text(body.timezone, 80, DEFAULT_TIMEZONE);
       try { new Intl.DateTimeFormat("en", { timeZone: timezone }).format(); } catch { throw new Error("Choose a valid timezone."); }
       const { data: workspace, error: readError } = await supabase.from("workspaces").select("zernio_api_key_encrypted").eq("id", workspaceId).single();
       if (readError) throw readError;
@@ -281,7 +282,7 @@ export async function POST(request: Request) {
       if (!workspace.zernio_api_key_encrypted) throw new Error("Connect this workspace to Zernio first.");
       const apiKey = decryptSecret(workspace.zernio_api_key_encrypted);
       const accounts = (workspace.zernio_accounts ?? []) as ZernioAccount[];
-      const timezone = workspace.timezone || "Asia/Manila";
+      const timezone = workspace.timezone || DEFAULT_TIMEZONE;
       const { data, error } = await supabase.from("schedule_queue").select("*").eq("workspace_id", workspaceId).in("id", queueIds);
       if (error) throw error;
       const results: Array<{ id: string; ok: boolean; error?: string }> = [];
