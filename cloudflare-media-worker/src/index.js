@@ -76,7 +76,11 @@ async function upload(request, env, url) {
 
 async function serveMedia(request, env, url) {
   const key = decodeURIComponent(url.pathname.slice("/media/".length));
-  const object = await env.MEDIA.get(key, { range: request.headers });
+  // Some social-media validators request a byte range but still require a
+  // complete 200 response for images. Keep range support for videos, where
+  // seeking is important, and serve images as a normal full response.
+  const isImage = /\.(avif|gif|jpe?g|png|webp)$/i.test(key);
+  const object = await env.MEDIA.get(key, isImage ? undefined : { range: request.headers });
   if (!object) return new Response("Not found", { status: 404 });
 
   const headers = new Headers({
@@ -87,7 +91,7 @@ async function serveMedia(request, env, url) {
   object.writeHttpMetadata(headers);
 
   let status = 200;
-  if (object.range && "offset" in object.range) {
+  if (!isImage && object.range && "offset" in object.range) {
     const end = object.range.offset + object.range.length - 1;
     headers.set("Content-Range", `bytes ${object.range.offset}-${end}/${object.size}`);
     status = 206;
