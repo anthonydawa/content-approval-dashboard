@@ -51,7 +51,6 @@ create table if not exists public.schedule_queue (
   media_url text not null default '',
   media_type text not null default 'image' check (media_type in ('image', 'video')),
   channel text not null default 'All platforms',
-  queue_position integer not null default 0,
   scheduled_at timestamptz,
   sync_state text not null default 'not_sent'
     check (sync_state in ('not_sent', 'dirty', 'synced', 'error')),
@@ -65,25 +64,10 @@ create table if not exists public.schedule_queue (
   unique (workspace_id, source_content_id)
 );
 
-alter table public.schedule_queue
-  add column if not exists queue_position integer not null default 0;
-
-with ranked_queue as (
-  select id, row_number() over (partition by workspace_id order by created_at, id) as position
-  from public.schedule_queue
-  where queue_position = 0
-)
-update public.schedule_queue as queue
-set queue_position = ranked_queue.position
-from ranked_queue
-where queue.id = ranked_queue.id;
-
 create index if not exists content_items_workspace_id_idx on public.content_items(workspace_id);
 create index if not exists comments_content_id_idx on public.comments(content_id);
 create index if not exists schedule_queue_workspace_schedule_idx
   on public.schedule_queue(workspace_id, scheduled_at);
-create index if not exists schedule_queue_workspace_position_idx
-  on public.schedule_queue(workspace_id, queue_position);
 create index if not exists schedule_queue_zernio_post_idx
   on public.schedule_queue(zernio_post_id)
   where zernio_post_id is not null;

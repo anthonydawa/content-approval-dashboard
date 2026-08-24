@@ -52,7 +52,6 @@ export type QueueSyncState = "not_sent" | "dirty" | "synced" | "error";
 export type QueueItem = {
   id: string;
   workspace_id: string;
-  queue_position: number;
   source_content_id: string | null;
   title: string;
   caption: string;
