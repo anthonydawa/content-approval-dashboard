@@ -213,6 +213,26 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
     }
   }
 
+  async function retrySchedule(item: QueueItem) {
+    if (item.zernio_status === "published") return;
+    if (!window.confirm(`Retry scheduling “${queueTitle(item)}” in Zernio?`)) return;
+    setBusy(true);
+    try {
+      const result = await apiRequest<{ results: Array<{ ok: boolean; error?: string }> }>("syncZernio", {
+        workspaceId: workspace.id,
+        queueIds: [item.id],
+      });
+      await onChanged();
+      const outcome = result.results[0];
+      if (!outcome?.ok) throw new Error(outcome?.error || "Zernio scheduling failed.");
+      flash("Scheduled in Zernio");
+    } catch (reason) {
+      flash(reason instanceof Error ? reason.message : "Could not retry Zernio scheduling.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <>
       <section className="scheduler-head">
@@ -266,7 +286,7 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
       ) : mode === "queue" ? (
         <QueueList queue={orderedQueue} timezone={workspace.timezone || DEFAULT_TIMEZONE} onSave={saveSchedule} onDelete={setDeleteItem} />
       ) : (
-        <CalendarGrid monthItems={orderedQueue} timezone={workspace.timezone || DEFAULT_TIMEZONE} busy={busy} onMove={saveSchedule} onPublishNow={publishNow} />
+        <CalendarGrid monthItems={orderedQueue} timezone={workspace.timezone || DEFAULT_TIMEZONE} busy={busy} onMove={saveSchedule} onPublishNow={publishNow} onRetry={retrySchedule} />
       )}
 
       {autoOpen && (
@@ -336,12 +356,13 @@ function QueueList({ queue, timezone, onSave, onDelete }: {
   );
 }
 
-function CalendarGrid({ monthItems, timezone, busy, onMove, onPublishNow }: {
+function CalendarGrid({ monthItems, timezone, busy, onMove, onPublishNow, onRetry }: {
   monthItems: QueueItem[];
   timezone: string;
   busy: boolean;
   onMove: (item: QueueItem, value: string) => Promise<void>;
   onPublishNow: (item: QueueItem) => Promise<void>;
+  onRetry: (item: QueueItem) => Promise<void>;
 }) {
   const firstScheduled = monthItems.find((item) => item.scheduled_at)?.scheduled_at;
   const [month, setMonth] = useState(() => {
@@ -406,14 +427,14 @@ function CalendarGrid({ monthItems, timezone, busy, onMove, onPublishNow }: {
                     <strong>{new Date(item.scheduled_at!).toLocaleTimeString("en", { timeZone: timezone, hour: "numeric", minute: "2-digit" })}</strong>
                     <span>{queueTitle(item)}</span>
                     <small>{syncLabel(item)}</small>
-                    {item.zernio_status !== "published" && !item.zernio_post_id && (
+                    {item.zernio_status !== "published" && (item.sync_state === "error" || !item.zernio_post_id) && (
                       <button
                         type="button"
                         className="calendar-send-now"
                         disabled={busy}
-                        onClick={(event) => { event.stopPropagation(); void onPublishNow(item); }}
+                        onClick={(event) => { event.stopPropagation(); void (item.sync_state === "error" ? onRetry(item) : onPublishNow(item)); }}
                       >
-                        Send now
+                        {item.sync_state === "error" ? "Retry" : "Send now"}
                       </button>
                     )}
                   </article>
