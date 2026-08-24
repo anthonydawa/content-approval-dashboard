@@ -396,6 +396,13 @@ function CalendarGrid({ monthItems, timezone, busy, onMove, onPublishNow }: {
                     onDragStart={(event) => event.dataTransfer.setData("text/queue-id", item.id)}
                     title={`${queueTitle(item)} · ${syncLabel(item)}`}
                   >
+                    {item.media_url && (
+                      item.media_type === "video" ? (
+                        <video className="calendar-post-thumb" src={item.media_url} muted preload="metadata" />
+                      ) : (
+                        <img className="calendar-post-thumb" src={item.media_url} alt="" loading="lazy" />
+                      )
+                    )}
                     <strong>{new Date(item.scheduled_at!).toLocaleTimeString("en", { timeZone: timezone, hour: "numeric", minute: "2-digit" })}</strong>
                     <span>{queueTitle(item)}</span>
                     <small>{syncLabel(item)}</small>
