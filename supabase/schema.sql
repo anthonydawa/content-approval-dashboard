@@ -157,6 +157,13 @@ create policy "server access schedule queue" on public.schedule_queue for all to
   using ((select private.app_request_authorized()))
   with check ((select private.app_request_authorized()));
 
+-- Media uploads now use Cloudflare R2. Remove the legacy anonymous Storage
+-- policies while keeping the existing public bucket URLs readable.
+drop policy if exists "public media reads" on storage.objects;
+drop policy if exists "testing media selects" on storage.objects;
+drop policy if exists "testing media updates" on storage.objects;
+drop policy if exists "testing media uploads" on storage.objects;
+
 -- The deployment applies these three statements with a generated hash:
 -- insert into private.app_settings(singleton, data_api_key_sha256)
 -- values (true, '<sha256>') on conflict (singleton) do update
