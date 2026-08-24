@@ -118,7 +118,12 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
     const byId = new Map(queue.map((item) => [item.id, item]));
     const saved = persistedOrder.map((id) => byId.get(id)).filter((item): item is QueueItem => Boolean(item));
     const remaining = queue.filter((item) => !persistedOrder.includes(item.id));
-    return [...saved, ...remaining];
+    const inOrder = [...saved, ...remaining];
+    const scheduled = inOrder.filter((item) => item.scheduled_at).sort((left, right) =>
+      new Date(left.scheduled_at!).getTime() - new Date(right.scheduled_at!).getTime(),
+    );
+    const unscheduled = inOrder.filter((item) => !item.scheduled_at);
+    return [...scheduled, ...unscheduled];
   }, [persistedOrder, queue]);
 
   async function saveSchedule(item: QueueItem, value: string) {
