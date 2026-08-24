@@ -1,18 +1,21 @@
 # Approve
 
-A simple social content approval app built for Vercel, Supabase, and Cloudflare R2.
+A social content approval and scheduling app built for Vercel, Supabase, Cloudflare R2, and Zernio.
 
-- Supabase stores workspaces, captions, approvals, and comments.
+- Supabase stores workspaces, captions, approvals, comments, and independent queue snapshots.
 - Cloudflare R2 stores and delivers uploaded images and videos.
+- The calendar supports manual scheduling, drag-and-drop day changes, and cadence-based auto queueing.
+- Zernio receives only the dashboard's tracked queue items after the schedule is approved.
+- A server-enforced shared login protects the dashboard and all data routes.
 
 ## Local setup
 
 1. Install dependencies with `pnpm install`.
-2. Copy `.env.example` to `.env.local` and add your Supabase and Cloudflare R2 values.
+2. Copy `.env.example` to `.env.local` and add the server-only Supabase, login, encryption, and Cloudflare values.
 3. Run `supabase/schema.sql` in the Supabase SQL Editor.
 4. Start the app with `pnpm dev`.
 
-Without Supabase values the app opens in a fully interactive demo mode. Demo changes last only until the page is refreshed.
+The generated shared login is stored locally in `ACCESS-CREDENTIALS.txt`. That file is ignored by Git. Zernio API keys are entered per workspace, encrypted before storage, and never returned to the browser.
 
 ## Deploy to Vercel
 
@@ -37,6 +40,10 @@ Import this folder or its Git repository into Vercel. Add all variables from `.e
 ]
 ```
 
-Uploads go directly from the browser to R2 through a five-minute signed URL. The R2 secret is used only by the server. Images, GIFs, MP4, WEBM, and MOV files up to 250 MB are accepted. Until the R2 variables are present, the existing Supabase media bucket is used as a temporary fallback.
+Uploads go directly from the browser to R2 through a five-minute signed URL. The R2 secret is used only by the server. Images, GIFs, MP4, WEBM, and MOV files up to 90 MB are accepted; larger videos are compressed before upload.
 
-The SQL policies are intentionally open for this no-login test. Replace them with authenticated policies before using real client content.
+## Security model
+
+The Supabase publishable key is used only from server route handlers. A separate random application API key is required by both PostgREST's pre-request hook and every RLS policy, so the public Supabase endpoint cannot be queried directly. The login session is an HTTP-only, secure, same-site cookie. Zernio credentials use AES-256-GCM encryption at rest.
+
+Queue deletion never deletes a Zernio post. Sync and status checks operate only on exact Zernio post IDs created and stored by this dashboard, leaving every pre-existing Zernio schedule untouched.

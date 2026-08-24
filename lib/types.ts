@@ -5,6 +5,10 @@ export type Workspace = {
   name: string;
   initials: string;
   color: string;
+  timezone: string;
+  zernio_configured: boolean;
+  zernio_accounts: ZernioAccount[];
+  auto_queue_cadence: QueueCadence;
 };
 
 export type Comment = {
@@ -29,3 +33,44 @@ export type ContentItem = {
   comments: Comment[];
 };
 
+export type ZernioAccount = {
+  id: string;
+  platform: string;
+  username: string;
+  display_name: string;
+};
+
+export type QueueCadence = {
+  frequency: "daily" | "weekdays" | "custom";
+  weekdays: number[];
+  times: string[];
+  start_date: string;
+};
+
+export type QueueSyncState = "not_sent" | "dirty" | "synced" | "error";
+
+export type QueueItem = {
+  id: string;
+  workspace_id: string;
+  source_content_id: string | null;
+  title: string;
+  caption: string;
+  media_url: string;
+  media_type: "image" | "video";
+  channel: string;
+  scheduled_at: string | null;
+  sync_state: QueueSyncState;
+  zernio_post_id: string | null;
+  zernio_status: string | null;
+  zernio_last_error: string | null;
+  zernio_request_id: string;
+  sent_to_zernio_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type DashboardData = {
+  workspaces: Workspace[];
+  content: ContentItem[];
+  queue: QueueItem[];
+};

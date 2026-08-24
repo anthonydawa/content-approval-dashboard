@@ -1,16 +1,19 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUpRight,
   Check,
   CheckCircle2,
+  CalendarDays,
   ChevronDown,
   CirclePlus,
   Clock3,
   ImagePlus,
   MessageCircle,
   MoreHorizontal,
+  ListChecks,
+  LogOut,
   Pencil,
   Play,
   Plus,
@@ -20,13 +23,15 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { demoContent, demoWorkspaces } from "@/lib/demo-data";
 import { MAX_MEDIA_BYTES, MEDIA_ACCEPT, uploadToR2 } from "@/lib/media-upload";
 import { prepareMediaForUpload } from "@/lib/video-compress";
-import { getSupabase } from "@/lib/supabase";
+import { apiRequest, loadDashboard } from "@/lib/api-client";
+import SchedulerView from "@/app/scheduler/scheduler-view";
 import type {
   Comment,
   ContentItem,
+  DashboardData,
+  QueueItem,
   ReviewStatus,
   Workspace,
 } from "@/lib/types";
@@ -50,24 +55,12 @@ function isVideoFile(file: File) {
   return file.type.startsWith("video/") || /\.(mp4|webm|mov)$/i.test(file.name);
 }
 
-function contentInsertRow(content: ContentItem) {
-  return {
-    id: content.id,
-    workspace_id: content.workspace_id,
-    title: content.title,
-    caption: content.caption,
-    media_url: content.media_url,
-    media_type: content.media_type,
-    channel: content.channel,
-    scheduled_for: content.scheduled_for,
-    status: content.status,
-    position: content.position,
-  };
-}
-
 export default function ApprovalApp() {
-  const [workspaces, setWorkspaces] = useState<Workspace[]>(demoWorkspaces);
-  const [items, setItems] = useState<ContentItem[]>(demoContent);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [items, setItems] = useState<ContentItem[]>([]);
+  const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [view, setView] = useState<"approval" | "queue" | "calendar">("approval");
+  const [selectedItems, setSelectedItems] = useState<string[]>([]);
   const [activeWorkspace, setActiveWorkspace] = useState<string | null>(null);
   const [commentOpen, setCommentOpen] = useState<string | null>(null);
   const [replaceItem, setReplaceItem] = useState<ContentItem | null>(null);
@@ -77,23 +70,26 @@ export default function ApprovalApp() {
   const [addContentOpen, setAddContentOpen] = useState(false);
   const [bulkUploadOpen, setBulkUploadOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [loading, setLoading] = useState(() => Boolean(getSupabase()));
+  const [loading, setLoading] = useState(true);
   const [mobileMenu, setMobileMenu] = useState(false);
 
-  useEffect(() => {
-    const supabase = getSupabase();
-    if (!supabase) return;
-    Promise.all([
-      supabase.from("workspaces").select("*").order("created_at"),
-      supabase.from("content_items").select("*, comments(*)").order("position"),
-    ]).then(([workspaceResult, contentResult]) => {
-      const loadedWorkspaces = (workspaceResult.data ?? []) as Workspace[];
-      setWorkspaces(loadedWorkspaces);
-      setActiveWorkspace(loadedWorkspaces[0]?.id ?? null);
-      setItems((contentResult.data ?? []) as ContentItem[]);
-      setLoading(false);
-    });
+  const refreshDashboard = useCallback(async () => {
+    const data = await loadDashboard<DashboardData>();
+    setWorkspaces(data.workspaces);
+    setItems(data.content);
+    setQueue(data.queue);
+    setActiveWorkspace((current) =>
+      current && data.workspaces.some((workspace) => workspace.id === current)
+        ? current
+        : data.workspaces[0]?.id ?? null,
+    );
+    setLoading(false);
   }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void refreshDashboard(), 0);
+    return () => window.clearTimeout(timer);
+  }, [refreshDashboard]);
 
   const active =
     workspaces.find((workspace) => workspace.id === activeWorkspace) ??
@@ -108,6 +104,10 @@ export default function ApprovalApp() {
   const approvedCount = visibleItems.filter(
     (item) => item.status === "approved",
   ).length;
+  const visibleQueue = useMemo(
+    () => queue.filter((item) => item.workspace_id === activeWorkspace),
+    [queue, activeWorkspace],
+  );
 
   function flash(message: string) {
     setNotice(message);
@@ -127,9 +127,7 @@ export default function ApprovalApp() {
     setItems((current) =>
       current.map((item) => (item.id === id ? { ...item, status } : item)),
     );
-    const supabase = getSupabase();
-    if (supabase)
-      await supabase.from("content_items").update({ status }).eq("id", id);
+    await apiRequest("updateStatus", { id, status });
     flash(status === "approved" ? "Content approved" : "Feedback saved");
   }
 
@@ -152,30 +150,30 @@ export default function ApprovalApp() {
           : entry,
       ),
     );
-    const supabase = getSupabase();
-    if (supabase) {
-      await supabase.from("comments").insert(comment);
-      await supabase
-        .from("content_items")
-        .update({ status: "changes_requested" })
-        .eq("id", item.id);
-    }
+    const result = await apiRequest<{ comment: Comment }>("addComment", {
+      contentId: item.id,
+      body,
+    });
+    setItems((current) =>
+      current.map((entry) =>
+        entry.id === item.id
+          ? { ...entry, comments: [...entry.comments.filter((saved) => saved.id !== comment.id), result.comment] }
+          : entry,
+      ),
+    );
     flash("Comment added");
   }
 
   async function replaceMedia(item: ContentItem, file: File) {
     const mediaUrl = await storeMedia(file, item.workspace_id, item.id);
-    const supabase = getSupabase();
-    if (supabase) {
-      await supabase
-        .from("content_items")
-        .update({
-          media_url: mediaUrl,
-          media_type: file.type.startsWith("video") ? "video" : "image",
-          status: "pending",
-        })
-        .eq("id", item.id);
-    }
+    await apiRequest("editContent", {
+      id: item.id,
+      title: item.title,
+      caption: item.caption,
+      channel: item.channel,
+      media_url: mediaUrl,
+      media_type: file.type.startsWith("video") ? "video" : "image",
+    });
     setItems((current) =>
       current.map((entry) =>
         entry.id === item.id
@@ -193,22 +191,11 @@ export default function ApprovalApp() {
   }
 
   async function createWorkspace(name: string, color: string) {
-    const workspace: Workspace = {
-      id: crypto.randomUUID(),
-      name,
-      initials: name
-        .split(/\s+/)
-        .map((part) => part[0])
-        .join("")
-        .slice(0, 2)
-        .toUpperCase(),
-      color,
-    };
+    const result = await apiRequest<{ workspace: Workspace }>("createWorkspace", { name, color });
+    const workspace = result.workspace;
     setWorkspaces((current) => [...current, workspace]);
     setActiveWorkspace(workspace.id);
     setNewWorkspaceOpen(false);
-    const supabase = getSupabase();
-    if (supabase) await supabase.from("workspaces").insert(workspace);
     flash(`${name} workspace created`);
   }
 
@@ -227,7 +214,6 @@ export default function ApprovalApp() {
       ? await storeMedia(data.file, activeWorkspace, id)
       : "";
     const mediaType = data.file && isVideoFile(data.file) ? "video" : "image";
-    const supabase = getSupabase();
     const content: ContentItem = {
       id,
       workspace_id: activeWorkspace,
@@ -242,12 +228,10 @@ export default function ApprovalApp() {
       comments: [],
     };
     setItems((current) => [...current, content]);
-    if (supabase) {
-      const { error } = await supabase
-        .from("content_items")
-        .insert(contentInsertRow(content));
-      if (error) throw error;
-    }
+    await apiRequest("addContent", {
+      workspaceId: activeWorkspace,
+      item: content,
+    });
     setAddContentOpen(false);
     flash("Content added to this batch");
   }
@@ -277,13 +261,10 @@ export default function ApprovalApp() {
       });
     }
 
-    const supabase = getSupabase();
-    if (supabase) {
-      const { error } = await supabase
-        .from("content_items")
-        .insert(drafts.map(contentInsertRow));
-      if (error) throw error;
-    }
+    await apiRequest("bulkAddContent", {
+      workspaceId: activeWorkspace,
+      items: drafts,
+    });
     setItems((current) => [...current, ...drafts]);
     setBulkUploadOpen(false);
     flash(`${drafts.length} drafts added to this batch`);
@@ -315,19 +296,14 @@ export default function ApprovalApp() {
       media_type: mediaType,
       status: "pending" as ReviewStatus,
     };
-    const supabase = getSupabase();
-    if (supabase)
-      await supabase
-        .from("content_items")
-        .update({
-          title: updated.title,
-          caption: updated.caption,
-          channel: updated.channel,
-          media_url: mediaUrl,
-          media_type: mediaType,
-          status: "pending",
-        })
-        .eq("id", item.id);
+    await apiRequest("editContent", {
+      id: item.id,
+      title: updated.title,
+      caption: updated.caption,
+      channel: updated.channel,
+      media_url: mediaUrl,
+      media_type: mediaType,
+    });
     setItems((current) =>
       current.map((entry) => (entry.id === item.id ? updated : entry)),
     );
@@ -336,17 +312,22 @@ export default function ApprovalApp() {
   }
 
   async function deleteContent(item: ContentItem) {
-    const supabase = getSupabase();
-    if (supabase) {
-      const { error } = await supabase
-        .from("content_items")
-        .delete()
-        .eq("id", item.id);
-      if (error) throw error;
-    }
+    await apiRequest("deleteContent", { id: item.id });
     setItems((current) => current.filter((entry) => entry.id !== item.id));
     setDeleteItem(null);
     flash("Content deleted");
+  }
+
+  async function moveToQueue(contentIds: string[]) {
+    if (!activeWorkspace || !contentIds.length) return;
+    await apiRequest("queueContent", {
+      workspaceId: activeWorkspace,
+      contentIds,
+    });
+    await refreshDashboard();
+    setSelectedItems([]);
+    setView("queue");
+    flash(`${contentIds.length} post${contentIds.length === 1 ? "" : "s"} moved to the queue`);
   }
 
   return (
@@ -410,6 +391,15 @@ export default function ApprovalApp() {
           </span>
           <MoreHorizontal size={18} />
         </div>
+        <button
+          className="logout-button"
+          onClick={async () => {
+            await fetch("/api/auth/logout", { method: "POST" });
+            window.location.assign("/login");
+          }}
+        >
+          <LogOut size={15} /> Sign out
+        </button>
       </aside>
 
       <section className="content-area">
@@ -423,7 +413,20 @@ export default function ApprovalApp() {
             <span>/</span>
             <strong>{active?.name || "Choose a workspace"}</strong>
           </div>
+          <nav className="view-tabs" aria-label="Dashboard sections">
+            <button className={view === "approval" ? "active" : ""} onClick={() => setView("approval")}>
+              <Check size={14} /> Approval
+            </button>
+            <button className={view === "queue" ? "active" : ""} onClick={() => setView("queue")}>
+              <ListChecks size={14} /> Queue
+            </button>
+            <button className={view === "calendar" ? "active" : ""} onClick={() => setView("calendar")}>
+              <CalendarDays size={14} /> Calendar
+            </button>
+          </nav>
           <div className="top-actions">
+            {view === "approval" && (
+              <>
             <button
               className="secondary-button"
               onClick={() => setNewWorkspaceOpen(true)}
@@ -444,10 +447,14 @@ export default function ApprovalApp() {
             >
               <Plus size={17} /> Add content
             </button>
+              </>
+            )}
           </div>
         </header>
 
         <div className="page-wrap">
+          {view === "approval" ? (
+            <>
           <section className="page-intro">
             <div>
               <div className="eyebrow">CONTENT REVIEW</div>
@@ -478,12 +485,22 @@ export default function ApprovalApp() {
 
           <div className="batch-heading">
             <div>
-              <h2>August content batch</h2>
+              <h2>Content batch</h2>
               <p>{visibleItems.length} posts ready for review</p>
             </div>
-            <span className="live-pill">
-              <span /> Live review
-            </span>
+            <div className="approval-batch-actions">
+              {selectedItems.length > 0 && (
+                <button className="primary-button" onClick={() => void moveToQueue(selectedItems)}>
+                  <ListChecks size={15} /> Queue selected ({selectedItems.length})
+                </button>
+              )}
+              {visibleItems.length > 0 && (
+                <button className="secondary-button" onClick={() => void moveToQueue(visibleItems.map((item) => item.id))}>
+                  Queue all
+                </button>
+              )}
+              <span className="live-pill"><span /> Live review</span>
+            </div>
           </div>
 
           {loading ? (
@@ -531,9 +548,29 @@ export default function ApprovalApp() {
                   onReplace={() => setReplaceItem(item)}
                   onEdit={() => setEditItem(item)}
                   onDelete={() => setDeleteItem(item)}
+                  selected={selectedItems.includes(item.id)}
+                  onSelect={() =>
+                    setSelectedItems((current) =>
+                      current.includes(item.id)
+                        ? current.filter((id) => id !== item.id)
+                        : [...current, item.id],
+                    )
+                  }
                 />
               ))}
             </div>
+          )}
+            </>
+          ) : active ? (
+            <SchedulerView
+              mode={view}
+              workspace={active}
+              queue={visibleQueue}
+              onChanged={refreshDashboard}
+              flash={flash}
+            />
+          ) : (
+            <div className="empty-state"><CirclePlus size={28} /><h3>Create a workspace first</h3></div>
           )}
           <footer>
             <span>
@@ -610,6 +647,8 @@ function ContentCard({
   onReplace,
   onEdit,
   onDelete,
+  selected,
+  onSelect,
 }: {
   item: ContentItem;
   index: number;
@@ -620,6 +659,8 @@ function ContentCard({
   onReplace: () => void;
   onEdit: () => void;
   onDelete: () => void;
+  selected: boolean;
+  onSelect: () => void;
 }) {
   const [comment, setComment] = useState("");
   const approved = item.status === "approved";
@@ -627,7 +668,16 @@ function ContentCard({
   return (
     <article className={`content-card ${approved ? "card-approved" : ""}`}>
       <div className="card-topline">
-        <div className="post-number">{String(index).padStart(2, "0")}</div>
+        <div className="card-topline-left">
+          <input
+            className="select-post"
+            type="checkbox"
+            checked={selected}
+            onChange={onSelect}
+            aria-label={`Select post ${index}`}
+          />
+          <div className="post-number">{String(index).padStart(2, "0")}</div>
+        </div>
         <div className={`status-pill status-${item.status}`}>
           <span />
           {statusLabel[item.status]}

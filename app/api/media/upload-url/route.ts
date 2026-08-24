@@ -1,4 +1,5 @@
 import { createHmac, randomUUID } from "node:crypto";
+import { assertSameOrigin, requireSession } from "@/lib/server/session";
 
 const MAX_MEDIA_BYTES = 90 * 1024 * 1024;
 const EXTENSIONS: Record<string, string> = {
@@ -16,6 +17,8 @@ function cleanId(value: string) {
 }
 
 export async function POST(request: Request) {
+  assertSameOrigin(request);
+  await requireSession();
   const mediaWorkerUrl = process.env.MEDIA_WORKER_URL?.replace(/\/$/, "");
   const signingSecret = process.env.UPLOAD_SIGNING_SECRET;
 
