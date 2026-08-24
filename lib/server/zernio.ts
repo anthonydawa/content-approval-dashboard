@@ -81,9 +81,9 @@ function scheduledFor(value: string, timezone: string) {
   return `${part("year")}-${part("month")}-${part("day")}T${part("hour")}:${part("minute")}:${part("second")}`;
 }
 
-function postBody(item: QueueItem, accounts: ZernioAccount[], timezone: string) {
-  if (!item.scheduled_at) throw new Error("Choose a schedule first.");
-  if (new Date(item.scheduled_at).getTime() <= Date.now()) {
+function postBody(item: QueueItem, accounts: ZernioAccount[], timezone: string, immediate = false) {
+  if (!immediate && !item.scheduled_at) throw new Error("Choose a schedule first.");
+  if (!immediate && item.scheduled_at && new Date(item.scheduled_at).getTime() <= Date.now()) {
     throw new Error("The scheduled time must be in the future.");
   }
   const platform = channelPlatform(item.channel);
@@ -103,10 +103,36 @@ function postBody(item: QueueItem, accounts: ZernioAccount[], timezone: string) 
       platform: account.platform,
       accountId: account.id,
     })),
-    scheduledFor: scheduledFor(item.scheduled_at, timezone),
-    timezone,
+    ...(immediate ? { publishNow: true } : { scheduledFor: scheduledFor(item.scheduled_at!, timezone), timezone }),
     isDraft: false,
   };
+}
+
+async function createZernioPost(apiKey: string, item: QueueItem, accounts: ZernioAccount[], timezone: string, immediate = false) {
+  try {
+    return await zernioFetch<{
+      post?: { _id?: string; status?: string };
+      existingPost?: { _id?: string; status?: string };
+    }>(apiKey, "/posts", {
+      method: "POST",
+      headers: { "x-request-id": item.zernio_request_id },
+      body: JSON.stringify(postBody(item, accounts, timezone, immediate)),
+    });
+  } catch (reason) {
+    const error = reason as Error & {
+      status?: number;
+      payload?: { existingPostId?: string };
+    };
+    if (error.status === 409 && error.payload?.existingPostId) {
+      return {
+        existingPost: {
+          _id: error.payload.existingPostId,
+          status: immediate ? "published" : "scheduled",
+        },
+      };
+    }
+    throw reason;
+  }
 }
 
 export async function syncZernioPost(
@@ -123,30 +149,11 @@ export async function syncZernioPost(
       { method: "PUT", body: JSON.stringify(body) },
     );
   }
-  try {
-    return await zernioFetch<{
-      post?: { _id?: string; status?: string };
-      existingPost?: { _id?: string; status?: string };
-    }>(apiKey, "/posts", {
-      method: "POST",
-      headers: { "x-request-id": item.zernio_request_id },
-      body: JSON.stringify(body),
-    });
-  } catch (reason) {
-    const error = reason as Error & {
-      status?: number;
-      payload?: { existingPostId?: string };
-    };
-    if (error.status === 409 && error.payload?.existingPostId) {
-      return {
-        existingPost: {
-          _id: error.payload.existingPostId,
-          status: "scheduled",
-        },
-      };
-    }
-    throw reason;
-  }
+  return createZernioPost(apiKey, item, accounts, timezone);
+}
+
+export async function publishZernioPost(apiKey: string, item: QueueItem, accounts: ZernioAccount[], timezone: string) {
+  return createZernioPost(apiKey, item, accounts, timezone, true);
 }
 
 export async function getZernioPost(apiKey: string, postId: string) {

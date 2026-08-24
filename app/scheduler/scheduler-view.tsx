@@ -138,6 +138,21 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
     }
   }
 
+  async function publishNow(item: QueueItem) {
+    if (item.zernio_status === "published" || item.zernio_post_id) return;
+    if (!window.confirm(`Send “${queueTitle(item)}” to Zernio now?`)) return;
+    setBusy(true);
+    try {
+      await apiRequest("publishNow", { workspaceId: workspace.id, id: item.id });
+      await onChanged();
+      flash("Published now — it will not be sent again with the scheduled batch");
+    } catch (reason) {
+      flash(reason instanceof Error ? reason.message : "Could not publish this post now.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <>
       <section className="scheduler-head">
@@ -180,7 +195,7 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
       ) : mode === "queue" ? (
         <QueueList queue={queue} timezone={workspace.timezone || DEFAULT_TIMEZONE} onSave={saveSchedule} onDelete={setDeleteItem} />
       ) : (
-        <CalendarGrid monthItems={queue} timezone={workspace.timezone || DEFAULT_TIMEZONE} onMove={saveSchedule} />
+        <CalendarGrid monthItems={queue} timezone={workspace.timezone || DEFAULT_TIMEZONE} busy={busy} onMove={saveSchedule} onPublishNow={publishNow} />
       )}
 
       {autoOpen && (
@@ -250,10 +265,12 @@ function QueueList({ queue, timezone, onSave, onDelete }: {
   );
 }
 
-function CalendarGrid({ monthItems, timezone, onMove }: {
+function CalendarGrid({ monthItems, timezone, busy, onMove, onPublishNow }: {
   monthItems: QueueItem[];
   timezone: string;
+  busy: boolean;
   onMove: (item: QueueItem, value: string) => Promise<void>;
+  onPublishNow: (item: QueueItem) => Promise<void>;
 }) {
   const firstScheduled = monthItems.find((item) => item.scheduled_at)?.scheduled_at;
   const [month, setMonth] = useState(() => {
@@ -311,6 +328,16 @@ function CalendarGrid({ monthItems, timezone, onMove }: {
                     <strong>{new Date(item.scheduled_at!).toLocaleTimeString("en", { timeZone: timezone, hour: "numeric", minute: "2-digit" })}</strong>
                     <span>{queueTitle(item)}</span>
                     <small>{syncLabel(item)}</small>
+                    {item.zernio_status !== "published" && !item.zernio_post_id && (
+                      <button
+                        type="button"
+                        className="calendar-send-now"
+                        disabled={busy}
+                        onClick={(event) => { event.stopPropagation(); void onPublishNow(item); }}
+                      >
+                        Send now
+                      </button>
+                    )}
                   </article>
                 ))}
               </div>

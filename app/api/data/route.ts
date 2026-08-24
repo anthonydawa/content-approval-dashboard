@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { decryptSecret, encryptSecret } from "@/lib/server/secret-box";
 import { assertSameOrigin, requireSession } from "@/lib/server/session";
 import { getServerSupabase } from "@/lib/server/supabase-admin";
-import { getZernioPost, listZernioAccounts, syncZernioPost } from "@/lib/server/zernio";
+import { getZernioPost, listZernioAccounts, publishZernioPost, syncZernioPost } from "@/lib/server/zernio";
 import type { QueueCadence, QueueItem, Workspace, ZernioAccount } from "@/lib/types";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -249,6 +249,35 @@ export async function POST(request: Request) {
         apiKey = decryptSecret(data.zernio_api_key_encrypted);
       }
       return NextResponse.json({ accounts: await listZernioAccounts(apiKey) });
+    }
+
+    if (action === "publishNow") {
+      const workspaceId = id(body.workspaceId, "workspace ID");
+      const queueId = id(body.id, "queue ID");
+      const { data: workspace, error: workspaceError } = await supabase.from("workspaces")
+        .select("timezone,zernio_api_key_encrypted,zernio_accounts").eq("id", workspaceId).single();
+      if (workspaceError) throw workspaceError;
+      if (!workspace.zernio_api_key_encrypted) throw new Error("Connect this workspace to Zernio first.");
+      const { data: queueItem, error: queueError } = await supabase.from("schedule_queue")
+        .select("*").eq("id", queueId).eq("workspace_id", workspaceId).single();
+      if (queueError) throw queueError;
+      if (queueItem.zernio_post_id || queueItem.zernio_status === "published") {
+        throw new Error("This post has already been sent to Zernio.");
+      }
+      const apiKey = decryptSecret(workspace.zernio_api_key_encrypted);
+      const timezone = workspace.timezone || DEFAULT_TIMEZONE;
+      const result = await publishZernioPost(apiKey, queueItem as QueueItem, (workspace.zernio_accounts ?? []) as ZernioAccount[], timezone) as {
+        post?: { _id?: string; status?: string };
+        existingPost?: { _id?: string; status?: string };
+      };
+      const post = result.post ?? result.existingPost;
+      if (!post?._id) throw new Error("Zernio did not return a published post ID.");
+      const { error: updateError } = await supabase.from("schedule_queue").update({
+        sync_state: "synced", zernio_post_id: post._id, zernio_status: "published",
+        zernio_last_error: null, sent_to_zernio_at: new Date().toISOString(),
+      }).eq("id", queueId);
+      if (updateError) throw updateError;
+      return NextResponse.json({ ok: true, postId: post._id });
     }
 
     if (action === "saveZernioConfig") {
