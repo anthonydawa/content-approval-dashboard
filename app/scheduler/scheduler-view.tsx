@@ -183,9 +183,9 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
   }
 
   async function clearUnsentQueue() {
-    const unsentCount = queue.filter((item) => !item.zernio_post_id).length;
-    if (!unsentCount) return flash("There are no unsent queue items to clear");
-    if (!window.confirm(`Remove ${unsentCount} unsent queue item${unsentCount === 1 ? "" : "s"}? Items already sent to Zernio will stay.`)) return;
+    const unsentCount = queue.filter((item) => !item.scheduled_at && !item.zernio_post_id).length;
+    if (!unsentCount) return flash("There are no unplanned queue items to clear");
+    if (!window.confirm(`Remove ${unsentCount} unplanned queue item${unsentCount === 1 ? "" : "s"}? Calendar-plotted and Zernio items will stay.`)) return;
     setBusy(true);
     try {
       const result = await apiRequest<{ removed: number; kept: number }>("clearUnsentQueue", { workspaceId: workspace.id });
@@ -234,7 +234,7 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
               <button className="secondary-button" disabled={busy || queue.length < 2} onClick={shuffleQueue}>
                 <Shuffle size={16} /> Shuffle order
               </button>
-              <button className="secondary-button" disabled={busy || !queue.some((item) => !item.zernio_post_id)} onClick={clearUnsentQueue}>
+              <button className="secondary-button" disabled={busy || !queue.some((item) => !item.scheduled_at && !item.zernio_post_id)} onClick={clearUnsentQueue}>
                 <Trash2 size={16} /> Clear unsent
               </button>
               <button className="primary-button" disabled={!orderedQueue.length || busy} onClick={() => setAutoOpen(true)}>
@@ -246,7 +246,7 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
               <button className="secondary-button" disabled={busy || !workspace.zernio_configured} onClick={refreshStatuses}>
                 <RefreshCw size={16} /> Refresh
               </button>
-              <button className="secondary-button" disabled={busy || !queue.some((item) => !item.zernio_post_id)} onClick={clearUnsentQueue}>
+              <button className="secondary-button" disabled={busy || !queue.some((item) => !item.scheduled_at && !item.zernio_post_id)} onClick={clearUnsentQueue}>
                 <Trash2 size={16} /> Clear unsent
               </button>
               <button className="primary-button" disabled={busy || !queue.some((item) => item.scheduled_at)} onClick={syncAll}>

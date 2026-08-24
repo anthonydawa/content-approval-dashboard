@@ -241,14 +241,14 @@ export async function POST(request: Request) {
     if (action === "clearUnsentQueue") {
       const workspaceId = id(body.workspaceId, "workspace ID");
       const { data: unsent, error: readError } = await supabase.from("schedule_queue")
-        .select("id").eq("workspace_id", workspaceId).is("zernio_post_id", null);
+        .select("id").eq("workspace_id", workspaceId).is("scheduled_at", null).is("zernio_post_id", null);
       if (readError) throw readError;
       if (!unsent?.length) return NextResponse.json({ removed: 0, kept: 0 });
       const { error } = await supabase.from("schedule_queue").delete()
-        .eq("workspace_id", workspaceId).is("zernio_post_id", null);
+        .eq("workspace_id", workspaceId).is("scheduled_at", null).is("zernio_post_id", null);
       if (error) throw error;
       const { count: kept, error: keptError } = await supabase.from("schedule_queue")
-        .select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).not("zernio_post_id", "is", null);
+        .select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId);
       if (keptError) throw keptError;
       return NextResponse.json({ removed: unsent.length, kept: kept ?? 0 });
     }
