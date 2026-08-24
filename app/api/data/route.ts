@@ -86,7 +86,7 @@ export async function GET() {
     const [workspaceResult, contentResult, queueResult] = await Promise.all([
       supabase.from("workspaces").select("id,name,initials,color,timezone,zernio_api_key_encrypted,zernio_accounts,auto_queue_cadence").order("created_at"),
       supabase.from("content_items").select("id,workspace_id,title,caption,media_url,media_type,channel,scheduled_for,status,position,comments(id,content_id,author,body,created_at)").order("position"),
-      supabase.from("schedule_queue").select("id,workspace_id,source_content_id,title,caption,media_url,media_type,channel,scheduled_at,sync_state,zernio_post_id,zernio_status,zernio_last_error,zernio_request_id,sent_to_zernio_at,created_at,updated_at").order("scheduled_at", { nullsFirst: false }).order("created_at"),
+      supabase.from("schedule_queue").select("id,workspace_id,source_content_id,title,caption,media_url,media_type,channel,scheduled_at,queue_position,sync_state,zernio_post_id,zernio_status,zernio_last_error,zernio_request_id,sent_to_zernio_at,created_at,updated_at").order("queue_position").order("created_at"),
     ]);
     const error = workspaceResult.error || contentResult.error || queueResult.error;
     if (error) throw error;
@@ -188,15 +188,33 @@ export async function POST(request: Request) {
         .select("id,workspace_id,title,caption,media_url,media_type,channel")
         .eq("workspace_id", workspaceId).in("id", contentIds);
       if (error) throw error;
-      const rows = (data ?? []).map((item) => ({
+      const queuePosition = Date.now();
+      const rows = (data ?? []).map((item, index) => ({
         id: randomUUID(), workspace_id: workspaceId, source_content_id: item.id,
         title: item.title, caption: item.caption, media_url: item.media_url,
-        media_type: item.media_type, channel: item.channel, zernio_request_id: randomUUID(),
+        media_type: item.media_type, channel: item.channel, queue_position: queuePosition + index, zernio_request_id: randomUUID(),
       }));
       if (!rows.length) throw new Error("No matching content was found.");
       const { error: insertError } = await supabase.from("schedule_queue").upsert(rows, { onConflict: "workspace_id,source_content_id", ignoreDuplicates: true });
       if (insertError) throw insertError;
       return NextResponse.json({ added: rows.length });
+    }
+
+    if (action === "shuffleQueue") {
+      const workspaceId = id(body.workspaceId, "workspace ID");
+      const { data, error } = await supabase.from("schedule_queue").select("id").eq("workspace_id", workspaceId);
+      if (error) throw error;
+      const shuffled = [...(data ?? [])];
+      for (let index = shuffled.length - 1; index > 0; index -= 1) {
+        const swapIndex = Math.floor(Math.random() * (index + 1));
+        [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
+      }
+      const updates = await Promise.all(shuffled.map((item, index) =>
+        supabase.from("schedule_queue").update({ queue_position: index + 1 }).eq("id", item.id).eq("workspace_id", workspaceId),
+      ));
+      const updateError = updates.find((result) => result.error)?.error;
+      if (updateError) throw updateError;
+      return NextResponse.json({ shuffled: shuffled.length });
     }
 
     if (action === "updateQueueSchedule") {

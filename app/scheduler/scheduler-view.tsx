@@ -10,6 +10,7 @@ import {
   RefreshCw,
   Settings2,
   Sparkles,
+  Shuffle,
   Trash2,
   X,
 } from "lucide-react";
@@ -102,6 +103,23 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [deleteItem, setDeleteItem] = useState<QueueItem | null>(null);
   const [busy, setBusy] = useState(false);
+  const [queueOrder, setQueueOrder] = useState<string[]>([]);
+  const [queueOrderWorkspace, setQueueOrderWorkspace] = useState("");
+  const persistedOrder = useMemo(() => {
+    if (queueOrderWorkspace === workspace.id && queueOrder.length) return queueOrder;
+    try {
+      const saved = JSON.parse(window.localStorage.getItem(`approval-queue-order:${workspace.id}`) || "[]");
+      return Array.isArray(saved) ? saved.filter((id): id is string => typeof id === "string") : [];
+    } catch {
+      return [];
+    }
+  }, [queueOrder, queueOrderWorkspace, workspace.id]);
+  const orderedQueue = useMemo(() => {
+    const byId = new Map(queue.map((item) => [item.id, item]));
+    const saved = persistedOrder.map((id) => byId.get(id)).filter((item): item is QueueItem => Boolean(item));
+    const remaining = queue.filter((item) => !persistedOrder.includes(item.id));
+    return [...saved, ...remaining];
+  }, [persistedOrder, queue]);
 
   async function saveSchedule(item: QueueItem, value: string) {
     if (!value) return;
@@ -133,6 +151,27 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
       const result = await apiRequest<{ refreshed: number }>("refreshZernio", { workspaceId: workspace.id });
       await onChanged();
       flash(`${result.refreshed} Zernio statuses refreshed`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function shuffleQueue() {
+    setBusy(true);
+    try {
+      const shuffled = [...orderedQueue];
+      for (let index = shuffled.length - 1; index > 0; index -= 1) {
+        const swapIndex = Math.floor(Math.random() * (index + 1));
+        [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
+      }
+      const nextOrder = shuffled.map((item) => item.id);
+      window.localStorage.setItem(`approval-queue-order:${workspace.id}`, JSON.stringify(nextOrder));
+      setQueueOrderWorkspace(workspace.id);
+      setQueueOrder(nextOrder);
+      await onChanged();
+      flash(`${shuffled.length} queued posts shuffled`);
+    } catch (reason) {
+      flash(reason instanceof Error ? reason.message : "Could not shuffle the queue.");
     } finally {
       setBusy(false);
     }
@@ -170,9 +209,14 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
             <Settings2 size={16} /> Zernio settings
           </button>
           {mode === "queue" ? (
-            <button className="primary-button" disabled={!queue.length} onClick={() => setAutoOpen(true)}>
-              <Sparkles size={16} /> Auto queue
-            </button>
+            <>
+              <button className="secondary-button" disabled={busy || queue.length < 2} onClick={shuffleQueue}>
+                <Shuffle size={16} /> Shuffle order
+              </button>
+              <button className="primary-button" disabled={!orderedQueue.length || busy} onClick={() => setAutoOpen(true)}>
+                <Sparkles size={16} /> Auto queue
+              </button>
+            </>
           ) : (
             <>
               <button className="secondary-button" disabled={busy || !workspace.zernio_configured} onClick={refreshStatuses}>
@@ -193,13 +237,13 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
           <p>Select posts in Approval and move them into this scheduling queue.</p>
         </div>
       ) : mode === "queue" ? (
-        <QueueList queue={queue} timezone={workspace.timezone || DEFAULT_TIMEZONE} onSave={saveSchedule} onDelete={setDeleteItem} />
+        <QueueList queue={orderedQueue} timezone={workspace.timezone || DEFAULT_TIMEZONE} onSave={saveSchedule} onDelete={setDeleteItem} />
       ) : (
-        <CalendarGrid monthItems={queue} timezone={workspace.timezone || DEFAULT_TIMEZONE} busy={busy} onMove={saveSchedule} onPublishNow={publishNow} />
+        <CalendarGrid monthItems={orderedQueue} timezone={workspace.timezone || DEFAULT_TIMEZONE} busy={busy} onMove={saveSchedule} onPublishNow={publishNow} />
       )}
 
       {autoOpen && (
-        <AutoQueueModal workspace={workspace} queue={queue} onClose={() => setAutoOpen(false)} onChanged={onChanged} flash={flash} />
+        <AutoQueueModal workspace={workspace} queue={orderedQueue} onClose={() => setAutoOpen(false)} onChanged={onChanged} flash={flash} />
       )}
       {settingsOpen && (
         <ZernioSettingsModal workspace={workspace} onClose={() => setSettingsOpen(false)} onChanged={onChanged} flash={flash} />
