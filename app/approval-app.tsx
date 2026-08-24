@@ -55,13 +55,26 @@ function isVideoFile(file: File) {
   return file.type.startsWith("video/") || /\.(mp4|webm|mov)$/i.test(file.name);
 }
 
+type DashboardView = "approval" | "queue" | "calendar";
+
+function savedDashboardView(): DashboardView {
+  if (typeof window === "undefined") return "approval";
+  const value = new URLSearchParams(window.location.search).get("view") || window.localStorage.getItem("approval-dashboard-view");
+  return value === "queue" || value === "calendar" ? value : "approval";
+}
+
+function savedWorkspaceId() {
+  if (typeof window === "undefined") return null;
+  return new URLSearchParams(window.location.search).get("workspace") || window.localStorage.getItem("approval-dashboard-workspace");
+}
+
 export default function ApprovalApp() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [items, setItems] = useState<ContentItem[]>([]);
   const [queue, setQueue] = useState<QueueItem[]>([]);
-  const [view, setView] = useState<"approval" | "queue" | "calendar">("approval");
+  const [view, setView] = useState<DashboardView>(savedDashboardView);
   const [selectedItems, setSelectedItems] = useState<string[]>([]);
-  const [activeWorkspace, setActiveWorkspace] = useState<string | null>(null);
+  const [activeWorkspace, setActiveWorkspace] = useState<string | null>(savedWorkspaceId);
   const [commentOpen, setCommentOpen] = useState<string | null>(null);
   const [replaceItem, setReplaceItem] = useState<ContentItem | null>(null);
   const [editItem, setEditItem] = useState<ContentItem | null>(null);
@@ -90,6 +103,16 @@ export default function ApprovalApp() {
     const timer = window.setTimeout(() => void refreshDashboard(), 0);
     return () => window.clearTimeout(timer);
   }, [refreshDashboard]);
+
+  useEffect(() => {
+    if (!activeWorkspace) return;
+    window.localStorage.setItem("approval-dashboard-view", view);
+    window.localStorage.setItem("approval-dashboard-workspace", activeWorkspace);
+    const url = new URL(window.location.href);
+    url.searchParams.set("view", view);
+    url.searchParams.set("workspace", activeWorkspace);
+    window.history.replaceState(null, "", `${url.pathname}?${url.searchParams.toString()}${url.hash}`);
+  }, [activeWorkspace, view]);
 
   const active =
     workspaces.find((workspace) => workspace.id === activeWorkspace) ??
