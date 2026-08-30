@@ -30,7 +30,7 @@ function secureHeaders(response: NextResponse) {
 
 export function proxy(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
-  const isPublic = pathname === "/login" || pathname === "/api/auth/login";
+  const isPublic = pathname === "/login" || pathname === "/demo" || pathname === "/demo/" || pathname === "/api/auth/login";
   const authenticated = validToken(request.cookies.get(COOKIE)?.value);
   if (!authenticated && !isPublic) {
     if (pathname.startsWith("/api/")) {

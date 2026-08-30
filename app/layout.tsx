@@ -4,6 +4,7 @@ import "./globals.css";
 import "./media-display.css";
 import "./login.css";
 import "./scheduler.css";
+import "./demo.css";
 
 const sans = DM_Sans({ variable: "--font-sans", subsets: ["latin"] });
 const display = Fraunces({ variable: "--font-display", subsets: ["latin"] });
