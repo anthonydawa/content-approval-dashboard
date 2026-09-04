@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { decryptSecret, encryptSecret } from "@/lib/server/secret-box";
 import { assertSameOrigin, requireSession } from "@/lib/server/session";
 import { getServerSupabase } from "@/lib/server/supabase-admin";
-import { getZernioPost, listPinterestBoards, listZernioAccounts, publishZernioPost, syncZernioPost } from "@/lib/server/zernio";
+import { getZernioPost, listPinterestBoards, listZernioAccounts, listZernioPosts, publishZernioPost, syncZernioPost, type ZernioPost } from "@/lib/server/zernio";
 import type { QueueCadence, QueueItem, Workspace, ZernioAccount } from "@/lib/types";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -83,6 +83,26 @@ function workspaceDto(row: Record<string, unknown>): Workspace {
       ? { ...DEFAULT_CADENCE, ...(row.auto_queue_cadence as QueueCadence) }
       : DEFAULT_CADENCE,
   };
+}
+
+function accountId(value: string | { _id?: string; id?: string } | undefined) {
+  if (typeof value === "string") return value;
+  return value?._id ?? value?.id ?? "";
+}
+
+function requestedPlatform(channel: string) {
+  const normalized = channel.toLowerCase();
+  return [...PRIMARY_PLATFORMS, ...SECONDARY_PLATFORMS].find((platform) => normalized.includes(platform)) ?? null;
+}
+
+function scheduleFingerprint(value: string | undefined) {
+  const parsed = Date.parse(value ?? "");
+  return Number.isNaN(parsed) ? String(value ?? "") : new Date(parsed).toISOString();
+}
+
+function postFingerprint(post: ZernioPost) {
+  const media = (post.mediaItems ?? []).map((item) => `${item.type ?? ""}:${item.url ?? ""}`).sort().join("|");
+  return `${post.content ?? ""}|${media}`;
 }
 
 export async function GET() {
@@ -484,6 +504,138 @@ export async function POST(request: Request) {
         }
       }
       return NextResponse.json({ refreshed });
+    }
+
+    if (action === "auditZernioSchedule") {
+      const workspaceId = id(body.workspaceId, "workspace ID");
+      const { data: workspace, error: workspaceError } = await supabase.from("workspaces")
+        .select("name,timezone,zernio_api_key_encrypted,zernio_accounts,zernio_secondary_api_key_encrypted,zernio_secondary_accounts")
+        .eq("id", workspaceId).single();
+      if (workspaceError) throw workspaceError;
+      const now = new Date();
+      const { data: queueRows, error: queueError } = await supabase.from("schedule_queue")
+        .select("*").eq("workspace_id", workspaceId).not("scheduled_at", "is", null)
+        .gte("scheduled_at", now.toISOString()).order("scheduled_at");
+      if (queueError) throw queueError;
+
+      const connections = [
+        workspace.zernio_api_key_encrypted && {
+          slot: "primary" as const,
+          label: "Facebook / Instagram",
+          apiKey: decryptSecret(workspace.zernio_api_key_encrypted),
+          accounts: (workspace.zernio_accounts ?? []) as ZernioAccount[],
+          allowedPlatforms: PRIMARY_PLATFORMS,
+        },
+        workspace.zernio_secondary_api_key_encrypted && {
+          slot: "secondary" as const,
+          label: "LinkedIn / Pinterest",
+          apiKey: decryptSecret(workspace.zernio_secondary_api_key_encrypted),
+          accounts: (workspace.zernio_secondary_accounts ?? []) as ZernioAccount[],
+          allowedPlatforms: SECONDARY_PLATFORMS,
+        },
+      ].filter(Boolean) as Array<{
+        slot: "primary" | "secondary";
+        label: string;
+        apiKey: string;
+        accounts: ZernioAccount[];
+        allowedPlatforms: string[];
+      }>;
+      const dateFrom = new Date(now.getTime() - 86_400_000).toISOString().slice(0, 10);
+      const listed = await Promise.all(connections.map(async (connection) => ({
+        connection,
+        result: await listZernioPosts(connection.apiKey, dateFrom),
+      })));
+      const issues: Array<Record<string, unknown>> = [];
+      const trackedIds = new Map<string, Array<{ itemId: string; title: string; slot: string }>>();
+      const auditedDeliveries: Array<Record<string, unknown>> = [];
+
+      for (const item of (queueRows ?? []) as QueueItem[]) {
+        const platform = requestedPlatform(item.channel);
+        for (const { connection, result } of listed) {
+          const eligibleAccounts = connection.accounts.filter((entry) => connection.allowedPlatforms.includes(entry.platform.toLowerCase()));
+          const expectedAccounts = platform
+            ? eligibleAccounts.filter((entry) => entry.platform.toLowerCase() === platform)
+            : eligibleAccounts;
+          if (!expectedAccounts.length) continue;
+          const postId = connection.slot === "primary" ? item.zernio_post_id : item.secondary_zernio_post_id;
+          const syncState = connection.slot === "primary" ? item.sync_state : item.secondary_sync_state;
+          const lastError = connection.slot === "primary" ? item.zernio_last_error : item.secondary_zernio_last_error;
+          if (!postId) {
+            issues.push({
+              kind: "missing_delivery",
+              itemId: item.id,
+              title: item.title || "(no title)",
+              scheduledAt: item.scheduled_at,
+              connection: connection.label,
+              expectedPlatforms: [...new Set(expectedAccounts.map((entry) => entry.platform.toLowerCase()))],
+              syncState,
+              error: lastError || undefined,
+            });
+            continue;
+          }
+          const tracked = trackedIds.get(postId) ?? [];
+          tracked.push({ itemId: item.id, title: item.title || "(no title)", slot: connection.slot });
+          trackedIds.set(postId, tracked);
+          let post = (result.posts ?? []).find((entry) => entry._id === postId);
+          if (!post) post = (await getZernioPost(connection.apiKey, postId)).post;
+          if (!post) {
+            issues.push({ kind: "missing_zernio_post", itemId: item.id, title: item.title || "(no title)", connection: connection.label, scheduledAt: item.scheduled_at });
+            continue;
+          }
+          const expectedTargets = new Set(expectedAccounts.map((entry) => `${entry.platform.toLowerCase()}:${entry.id}`));
+          const actualTargets = new Set((post.platforms ?? []).map((entry) => `${String(entry.platform ?? "").toLowerCase()}:${accountId(entry.accountId)}`));
+          const expectedPlatforms = [...new Set(expectedAccounts.map((entry) => entry.platform.toLowerCase()))].sort();
+          const actualPlatforms = [...new Set((post.platforms ?? []).map((entry) => String(entry.platform ?? "").toLowerCase()).filter(Boolean))].sort();
+          const expectedTime = Date.parse(item.scheduled_at ?? "");
+          const actualTime = Date.parse(post.scheduledFor ?? "");
+          const scheduleMatches = !Number.isNaN(expectedTime) && !Number.isNaN(actualTime) && Math.abs(expectedTime - actualTime) < 60_000;
+          const targetsMatch = expectedTargets.size === actualTargets.size && [...expectedTargets].every((target) => actualTargets.has(target));
+          auditedDeliveries.push({
+            itemId: item.id,
+            title: item.title || "(no title)",
+            scheduledAt: item.scheduled_at,
+            connection: connection.label,
+            status: post.status ?? null,
+            platforms: actualPlatforms,
+            scheduleMatches,
+            targetsMatch,
+          });
+          if (!scheduleMatches) issues.push({ kind: "schedule_mismatch", itemId: item.id, title: item.title || "(no title)", connection: connection.label, calendarTime: item.scheduled_at, zernioTime: post.scheduledFor ?? null });
+          if (!targetsMatch) issues.push({ kind: "platform_mismatch", itemId: item.id, title: item.title || "(no title)", connection: connection.label, expectedPlatforms, actualPlatforms });
+          if (["failed", "partial", "cancelled"].includes(String(post.status ?? "").toLowerCase())) {
+            issues.push({ kind: "zernio_status", itemId: item.id, title: item.title || "(no title)", connection: connection.label, status: post.status });
+          }
+        }
+      }
+
+      for (const [postId, uses] of trackedIds) {
+        if (uses.length > 1) issues.push({ kind: "duplicate_tracked_post_id", postId, uses });
+      }
+
+      for (const { connection, result } of listed) {
+        const duplicateKeys = new Map<string, Set<string>>();
+        for (const post of result.posts ?? []) {
+          if (!post._id || !post.scheduledFor) continue;
+          const contentKey = postFingerprint(post);
+          for (const target of post.platforms ?? []) {
+            const key = [String(target.platform ?? "").toLowerCase(), accountId(target.accountId), scheduleFingerprint(post.scheduledFor), contentKey].join("|");
+            const posts = duplicateKeys.get(key) ?? new Set<string>();
+            posts.add(post._id);
+            duplicateKeys.set(key, posts);
+          }
+        }
+        for (const posts of duplicateKeys.values()) {
+          if (posts.size > 1) issues.push({ kind: "duplicate_zernio_delivery", connection: connection.label, count: posts.size, postIds: [...posts] });
+        }
+      }
+
+      return NextResponse.json({
+        workspace: workspace.name,
+        timezone: workspace.timezone || DEFAULT_TIMEZONE,
+        futureCalendarItems: queueRows?.length ?? 0,
+        auditedDeliveries,
+        issues,
+      });
     }
 
     throw new Error("Unknown action.");

@@ -4,6 +4,21 @@ import type { QueueItem, ZernioAccount, ZernioBoard } from "@/lib/types";
 
 const BASE_URL = "https://zernio.com/api/v1";
 
+export type ZernioPost = {
+  _id?: string;
+  title?: string;
+  content?: string;
+  status?: string;
+  scheduledFor?: string;
+  timezone?: string;
+  mediaItems?: Array<{ url?: string; type?: string }>;
+  platforms?: Array<{
+    platform?: string;
+    accountId?: string | { _id?: string; id?: string };
+    status?: string;
+  }>;
+};
+
 async function zernioFetch<T>(
   apiKey: string,
   path: string,
@@ -193,7 +208,22 @@ export async function publishZernioPost(apiKey: string, item: QueueItem, account
 }
 
 export async function getZernioPost(apiKey: string, postId: string) {
+  return zernioFetch<{ post?: ZernioPost }>(
+    apiKey,
+    `/posts/${encodeURIComponent(postId)}`,
+  );
+}
+
+export async function listZernioPosts(apiKey: string, dateFrom: string) {
+  const query = new URLSearchParams({
+    page: "1",
+    limit: "500",
+    source: "zernio",
+    dateFrom,
+    sortBy: "scheduled-asc",
+  });
   return zernioFetch<{
-    post?: { _id?: string; status?: string; scheduledFor?: string };
-  }>(apiKey, `/posts/${encodeURIComponent(postId)}`);
+    posts?: ZernioPost[];
+    pagination?: { page?: number; limit?: number; total?: number; pages?: number };
+  }>(apiKey, `/posts?${query.toString()}`);
 }
