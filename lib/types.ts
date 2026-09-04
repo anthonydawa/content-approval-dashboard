@@ -8,6 +8,10 @@ export type Workspace = {
   timezone: string;
   zernio_configured: boolean;
   zernio_accounts: ZernioAccount[];
+  zernio_secondary_configured: boolean;
+  zernio_secondary_accounts: ZernioAccount[];
+  pinterest_board_id: string;
+  pinterest_board_name: string;
   auto_queue_cadence: QueueCadence;
 };
 
@@ -40,6 +44,11 @@ export type ZernioAccount = {
   display_name: string;
 };
 
+export type ZernioBoard = {
+  id: string;
+  name: string;
+};
+
 export type QueueCadence = {
   frequency: "daily" | "weekdays" | "custom";
   weekdays: number[];
@@ -65,6 +74,12 @@ export type QueueItem = {
   zernio_last_error: string | null;
   zernio_request_id: string;
   sent_to_zernio_at: string | null;
+  secondary_sync_state: QueueSyncState;
+  secondary_zernio_post_id: string | null;
+  secondary_zernio_status: string | null;
+  secondary_zernio_last_error: string | null;
+  secondary_zernio_request_id: string;
+  secondary_sent_to_zernio_at: string | null;
   created_at: string;
   updated_at: string;
 };

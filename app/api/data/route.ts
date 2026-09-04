@@ -3,12 +3,14 @@ import { NextResponse } from "next/server";
 import { decryptSecret, encryptSecret } from "@/lib/server/secret-box";
 import { assertSameOrigin, requireSession } from "@/lib/server/session";
 import { getServerSupabase } from "@/lib/server/supabase-admin";
-import { getZernioPost, listZernioAccounts, publishZernioPost, syncZernioPost } from "@/lib/server/zernio";
+import { getZernioPost, listPinterestBoards, listZernioAccounts, publishZernioPost, syncZernioPost } from "@/lib/server/zernio";
 import type { QueueCadence, QueueItem, Workspace, ZernioAccount } from "@/lib/types";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DEFAULT_TIMEZONE = "America/Chicago";
 const DEFAULT_CADENCE: QueueCadence = { frequency: "weekdays", weekdays: [1, 2, 3, 4, 5], times: ["09:00"], start_date: "" };
+const PRIMARY_PLATFORMS = ["facebook", "instagram"];
+const SECONDARY_PLATFORMS = ["linkedin", "pinterest"];
 
 function id(value: unknown, name = "id") {
   if (typeof value !== "string" || !UUID.test(value)) throw new Error(`Invalid ${name}.`);
@@ -73,6 +75,10 @@ function workspaceDto(row: Record<string, unknown>): Workspace {
     timezone: String(row.timezone ?? DEFAULT_TIMEZONE),
     zernio_configured: Boolean(row.zernio_api_key_encrypted),
     zernio_accounts: Array.isArray(row.zernio_accounts) ? (row.zernio_accounts as ZernioAccount[]) : [],
+    zernio_secondary_configured: Boolean(row.zernio_secondary_api_key_encrypted),
+    zernio_secondary_accounts: Array.isArray(row.zernio_secondary_accounts) ? (row.zernio_secondary_accounts as ZernioAccount[]) : [],
+    pinterest_board_id: String(row.pinterest_board_id ?? ""),
+    pinterest_board_name: String(row.pinterest_board_name ?? ""),
     auto_queue_cadence: row.auto_queue_cadence && typeof row.auto_queue_cadence === "object"
       ? { ...DEFAULT_CADENCE, ...(row.auto_queue_cadence as QueueCadence) }
       : DEFAULT_CADENCE,
@@ -84,9 +90,9 @@ export async function GET() {
     await requireSession();
     const supabase = getServerSupabase();
     const [workspaceResult, contentResult, queueResult] = await Promise.all([
-      supabase.from("workspaces").select("id,name,initials,color,timezone,zernio_api_key_encrypted,zernio_accounts,auto_queue_cadence").order("created_at"),
+      supabase.from("workspaces").select("id,name,initials,color,timezone,zernio_api_key_encrypted,zernio_accounts,zernio_secondary_api_key_encrypted,zernio_secondary_accounts,pinterest_board_id,pinterest_board_name,auto_queue_cadence").order("created_at"),
       supabase.from("content_items").select("id,workspace_id,title,caption,media_url,media_type,channel,scheduled_for,status,position,comments(id,content_id,author,body,created_at)").order("position"),
-      supabase.from("schedule_queue").select("id,workspace_id,source_content_id,title,caption,media_url,media_type,channel,scheduled_at,sync_state,zernio_post_id,zernio_status,zernio_last_error,zernio_request_id,sent_to_zernio_at,created_at,updated_at").order("scheduled_at", { nullsFirst: false }).order("created_at"),
+      supabase.from("schedule_queue").select("id,workspace_id,source_content_id,title,caption,media_url,media_type,channel,scheduled_at,sync_state,zernio_post_id,zernio_status,zernio_last_error,zernio_request_id,sent_to_zernio_at,secondary_sync_state,secondary_zernio_post_id,secondary_zernio_status,secondary_zernio_last_error,secondary_zernio_request_id,secondary_sent_to_zernio_at,created_at,updated_at").order("scheduled_at", { nullsFirst: false }).order("created_at"),
     ]);
     const error = workspaceResult.error || contentResult.error || queueResult.error;
     if (error) throw error;
@@ -191,7 +197,7 @@ export async function POST(request: Request) {
       const rows = (data ?? []).map((item) => ({
         id: randomUUID(), workspace_id: workspaceId, source_content_id: item.id,
         title: item.title, caption: item.caption, media_url: item.media_url,
-        media_type: item.media_type, channel: item.channel, zernio_request_id: randomUUID(),
+        media_type: item.media_type, channel: item.channel, zernio_request_id: randomUUID(), secondary_zernio_request_id: randomUUID(),
       }));
       if (!rows.length) throw new Error("No matching content was found.");
       const { error: insertError } = await supabase.from("schedule_queue").upsert(rows, { onConflict: "workspace_id,source_content_id", ignoreDuplicates: true });
@@ -203,10 +209,14 @@ export async function POST(request: Request) {
       const queueId = id(body.id);
       const scheduledAt = text(body.scheduledAt, 40);
       if (!scheduledAt || Number.isNaN(Date.parse(scheduledAt))) throw new Error("Choose a valid date and time.");
-      const { data: existing, error: readError } = await supabase.from("schedule_queue").select("zernio_post_id").eq("id", queueId).single();
+      const { data: existing, error: readError } = await supabase.from("schedule_queue").select("zernio_post_id,secondary_zernio_post_id").eq("id", queueId).single();
       if (readError) throw readError;
       const { error } = await supabase.from("schedule_queue").update({
-        scheduled_at: new Date(scheduledAt).toISOString(), sync_state: existing.zernio_post_id ? "dirty" : "not_sent", zernio_last_error: null,
+        scheduled_at: new Date(scheduledAt).toISOString(),
+        sync_state: existing.zernio_post_id ? "dirty" : "not_sent",
+        secondary_sync_state: existing.secondary_zernio_post_id ? "dirty" : "not_sent",
+        zernio_last_error: null,
+        secondary_zernio_last_error: null,
       }).eq("id", queueId);
       if (error) throw error;
       return NextResponse.json({ ok: true });
@@ -221,7 +231,7 @@ export async function POST(request: Request) {
         const value = entry as Record<string, unknown>;
         const scheduledAt = text(value.scheduledAt, 40);
         if (Number.isNaN(Date.parse(scheduledAt))) throw new Error("Invalid auto-queue date.");
-        return supabase.from("schedule_queue").update({ scheduled_at: new Date(scheduledAt).toISOString(), sync_state: "not_sent", zernio_last_error: null })
+        return supabase.from("schedule_queue").update({ scheduled_at: new Date(scheduledAt).toISOString(), sync_state: "not_sent", secondary_sync_state: "not_sent", zernio_last_error: null, secondary_zernio_last_error: null })
           .eq("workspace_id", workspaceId).eq("id", id(value.id));
       });
       const results = await Promise.all(updates);
@@ -241,11 +251,11 @@ export async function POST(request: Request) {
     if (action === "clearUnsentQueue") {
       const workspaceId = id(body.workspaceId, "workspace ID");
       const { data: unsent, error: readError } = await supabase.from("schedule_queue")
-        .select("id").eq("workspace_id", workspaceId).is("scheduled_at", null).is("zernio_post_id", null);
+        .select("id").eq("workspace_id", workspaceId).is("scheduled_at", null).is("zernio_post_id", null).is("secondary_zernio_post_id", null);
       if (readError) throw readError;
       if (!unsent?.length) return NextResponse.json({ removed: 0, kept: 0 });
       const { error } = await supabase.from("schedule_queue").delete()
-        .eq("workspace_id", workspaceId).is("scheduled_at", null).is("zernio_post_id", null);
+        .eq("workspace_id", workspaceId).is("scheduled_at", null).is("zernio_post_id", null).is("secondary_zernio_post_id", null);
       if (error) throw error;
       const { count: kept, error: keptError } = await supabase.from("schedule_queue")
         .select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId);
@@ -256,124 +266,221 @@ export async function POST(request: Request) {
     if (action === "loadZernioAccounts") {
       const workspaceId = id(body.workspaceId, "workspace ID");
       const suppliedKey = text(body.apiKey, 200);
+      const keySlot = body.keySlot === "secondary" ? "secondary" : "primary";
+      const keyColumn = keySlot === "secondary" ? "zernio_secondary_api_key_encrypted" : "zernio_api_key_encrypted";
       let apiKey = suppliedKey;
       if (!apiKey) {
-        const { data, error } = await supabase.from("workspaces").select("zernio_api_key_encrypted").eq("id", workspaceId).single();
+        const { data, error } = await supabase.from("workspaces").select("zernio_api_key_encrypted,zernio_secondary_api_key_encrypted").eq("id", workspaceId).single();
         if (error) throw error;
-        if (!data.zernio_api_key_encrypted) throw new Error("Enter a Zernio API key.");
-        apiKey = decryptSecret(data.zernio_api_key_encrypted);
+        const encrypted = data[keyColumn] as string | null;
+        if (!encrypted) throw new Error("Enter a Zernio API key.");
+        apiKey = decryptSecret(encrypted);
       }
-      return NextResponse.json({ accounts: await listZernioAccounts(apiKey) });
+      const supported = keySlot === "secondary" ? SECONDARY_PLATFORMS : PRIMARY_PLATFORMS;
+      const accounts = (await listZernioAccounts(apiKey)).filter((account) => supported.includes(account.platform.toLowerCase()));
+      return NextResponse.json({ accounts });
+    }
+
+    if (action === "loadPinterestBoards") {
+      const workspaceId = id(body.workspaceId, "workspace ID");
+      const accountId = text(body.accountId, 100);
+      if (!accountId) throw new Error("Choose a Pinterest account first.");
+      const suppliedKey = text(body.apiKey, 200);
+      const { data, error } = await supabase.from("workspaces").select("zernio_secondary_api_key_encrypted").eq("id", workspaceId).single();
+      if (error) throw error;
+      const apiKey = suppliedKey || (data.zernio_secondary_api_key_encrypted ? decryptSecret(data.zernio_secondary_api_key_encrypted) : "");
+      if (!apiKey) throw new Error("Enter the LinkedIn / Pinterest Zernio API key first.");
+      return NextResponse.json({ boards: await listPinterestBoards(apiKey, accountId) });
     }
 
     if (action === "publishNow") {
       const workspaceId = id(body.workspaceId, "workspace ID");
       const queueId = id(body.id, "queue ID");
       const { data: workspace, error: workspaceError } = await supabase.from("workspaces")
-        .select("timezone,zernio_api_key_encrypted,zernio_accounts").eq("id", workspaceId).single();
+        .select("timezone,zernio_api_key_encrypted,zernio_accounts,zernio_secondary_api_key_encrypted,zernio_secondary_accounts,pinterest_board_id").eq("id", workspaceId).single();
       if (workspaceError) throw workspaceError;
-      if (!workspace.zernio_api_key_encrypted) throw new Error("Connect this workspace to Zernio first.");
+      if (!workspace.zernio_api_key_encrypted && !workspace.zernio_secondary_api_key_encrypted) throw new Error("Connect this workspace to Zernio first.");
       const { data: queueItem, error: queueError } = await supabase.from("schedule_queue")
         .select("*").eq("id", queueId).eq("workspace_id", workspaceId).single();
       if (queueError) throw queueError;
-      if (queueItem.zernio_post_id || queueItem.zernio_status === "published") {
+      if (queueItem.zernio_post_id || queueItem.secondary_zernio_post_id || queueItem.zernio_status === "published" || queueItem.secondary_zernio_status === "published") {
         throw new Error("This post has already been sent to Zernio.");
       }
-      const apiKey = decryptSecret(workspace.zernio_api_key_encrypted);
       const timezone = workspace.timezone || DEFAULT_TIMEZONE;
-      const result = await publishZernioPost(apiKey, queueItem as QueueItem, (workspace.zernio_accounts ?? []) as ZernioAccount[], timezone) as {
-        post?: { _id?: string; status?: string };
-        existingPost?: { _id?: string; status?: string };
-      };
-      const post = result.post ?? result.existingPost;
-      if (!post?._id) throw new Error("Zernio did not return a published post ID.");
-      const { error: updateError } = await supabase.from("schedule_queue").update({
-        sync_state: "synced", zernio_post_id: post._id, zernio_status: "published",
-        zernio_last_error: null, sent_to_zernio_at: new Date().toISOString(),
-      }).eq("id", queueId);
-      if (updateError) throw updateError;
-      return NextResponse.json({ ok: true, postId: post._id });
+      const item = queueItem as QueueItem;
+      const deliveries = [
+        workspace.zernio_api_key_encrypted && {
+          slot: "primary", apiKey: decryptSecret(workspace.zernio_api_key_encrypted), accounts: (workspace.zernio_accounts ?? []) as ZernioAccount[],
+          allowedPlatforms: PRIMARY_PLATFORMS, requestId: item.zernio_request_id,
+        },
+        workspace.zernio_secondary_api_key_encrypted && {
+          slot: "secondary", apiKey: decryptSecret(workspace.zernio_secondary_api_key_encrypted), accounts: (workspace.zernio_secondary_accounts ?? []) as ZernioAccount[],
+          allowedPlatforms: SECONDARY_PLATFORMS, requestId: item.secondary_zernio_request_id,
+        },
+      ].filter(Boolean) as Array<{ slot: "primary" | "secondary"; apiKey: string; accounts: ZernioAccount[]; allowedPlatforms: string[]; requestId: string }>;
+      const postIds: string[] = [];
+      for (const delivery of deliveries) {
+        const deliveryItem = { ...item, zernio_request_id: delivery.requestId };
+        const result = await publishZernioPost(delivery.apiKey, deliveryItem, delivery.accounts, timezone, {
+          allowedPlatforms: delivery.allowedPlatforms,
+          pinterestBoardId: workspace.pinterest_board_id,
+        }) as { post?: { _id?: string; status?: string }; existingPost?: { _id?: string; status?: string } };
+        const post = result.post ?? result.existingPost;
+        if (!post?._id) throw new Error(`Zernio did not return a ${delivery.slot} published post ID.`);
+        const update = delivery.slot === "primary"
+          ? { sync_state: "synced", zernio_post_id: post._id, zernio_status: "published", zernio_last_error: null, sent_to_zernio_at: new Date().toISOString() }
+          : { secondary_sync_state: "synced", secondary_zernio_post_id: post._id, secondary_zernio_status: "published", secondary_zernio_last_error: null, secondary_sent_to_zernio_at: new Date().toISOString() };
+        const { error: updateError } = await supabase.from("schedule_queue").update(update).eq("id", queueId);
+        if (updateError) throw updateError;
+        postIds.push(post._id);
+      }
+      return NextResponse.json({ ok: true, postIds });
     }
 
     if (action === "saveZernioConfig") {
       const workspaceId = id(body.workspaceId, "workspace ID");
-      const suppliedKey = text(body.apiKey, 200);
+      const suppliedPrimaryKey = text(body.primaryApiKey, 200);
+      const suppliedSecondaryKey = text(body.secondaryApiKey, 200);
       const timezone = text(body.timezone, 80, DEFAULT_TIMEZONE);
       try { new Intl.DateTimeFormat("en", { timeZone: timezone }).format(); } catch { throw new Error("Choose a valid timezone."); }
-      const { data: workspace, error: readError } = await supabase.from("workspaces").select("zernio_api_key_encrypted").eq("id", workspaceId).single();
+      const { data: workspace, error: readError } = await supabase.from("workspaces").select("zernio_api_key_encrypted,zernio_secondary_api_key_encrypted").eq("id", workspaceId).single();
       if (readError) throw readError;
-      const apiKey = suppliedKey || (workspace.zernio_api_key_encrypted ? decryptSecret(workspace.zernio_api_key_encrypted) : "");
-      if (!apiKey) throw new Error("Enter a Zernio API key.");
-      const available = await listZernioAccounts(apiKey);
-      const selectedIds = new Set(externalIds(body.accountIds));
-      const selected = available.filter((account) => selectedIds.has(account.id));
-      if (!selected.length) throw new Error("Select at least one connected account.");
+      const primaryKey = suppliedPrimaryKey || (workspace.zernio_api_key_encrypted ? decryptSecret(workspace.zernio_api_key_encrypted) : "");
+      const secondaryKey = suppliedSecondaryKey || (workspace.zernio_secondary_api_key_encrypted ? decryptSecret(workspace.zernio_secondary_api_key_encrypted) : "");
+      if (!primaryKey) throw new Error("Enter the Facebook / Instagram Zernio API key.");
+      const primaryIds = new Set(externalIds(body.primaryAccountIds));
+      const primaryAvailable = (await listZernioAccounts(primaryKey)).filter((account) => PRIMARY_PLATFORMS.includes(account.platform.toLowerCase()));
+      const primarySelected = primaryAvailable.filter((account) => primaryIds.has(account.id));
+      if (!primarySelected.length) throw new Error("Select at least one Facebook or Instagram account.");
+      let secondarySelected: ZernioAccount[] = [];
+      if (secondaryKey) {
+        const secondaryIds = new Set(externalIds(body.secondaryAccountIds));
+        const secondaryAvailable = (await listZernioAccounts(secondaryKey)).filter((account) => SECONDARY_PLATFORMS.includes(account.platform.toLowerCase()));
+        secondarySelected = secondaryAvailable.filter((account) => secondaryIds.has(account.id));
+        if (!secondarySelected.length) throw new Error("Select at least one LinkedIn or Pinterest account.");
+      }
+      const pinterestBoardId = text(body.pinterestBoardId, 160);
+      const pinterestBoardName = text(body.pinterestBoardName, 160);
+      if (secondarySelected.some((account) => account.platform.toLowerCase() === "pinterest") && !pinterestBoardId) {
+        throw new Error("Choose a default Pinterest board.");
+      }
       const { error } = await supabase.from("workspaces").update({
         timezone,
-        zernio_api_key_encrypted: suppliedKey ? encryptSecret(suppliedKey) : workspace.zernio_api_key_encrypted,
-        zernio_accounts: selected,
+        zernio_api_key_encrypted: suppliedPrimaryKey ? encryptSecret(suppliedPrimaryKey) : workspace.zernio_api_key_encrypted,
+        zernio_accounts: primarySelected,
+        zernio_secondary_api_key_encrypted: suppliedSecondaryKey ? encryptSecret(suppliedSecondaryKey) : workspace.zernio_secondary_api_key_encrypted,
+        zernio_secondary_accounts: secondarySelected,
+        pinterest_board_id: pinterestBoardId,
+        pinterest_board_name: pinterestBoardName,
       }).eq("id", workspaceId);
       if (error) throw error;
-      return NextResponse.json({ accounts: selected, timezone });
+      return NextResponse.json({ primaryAccounts: primarySelected, secondaryAccounts: secondarySelected, timezone });
     }
 
     if (action === "syncZernio") {
       const workspaceId = id(body.workspaceId, "workspace ID");
       const queueIds = ids(body.queueIds, 250);
       const { data: workspace, error: workspaceError } = await supabase.from("workspaces")
-        .select("timezone,zernio_api_key_encrypted,zernio_accounts").eq("id", workspaceId).single();
+        .select("timezone,zernio_api_key_encrypted,zernio_accounts,zernio_secondary_api_key_encrypted,zernio_secondary_accounts,pinterest_board_id").eq("id", workspaceId).single();
       if (workspaceError) throw workspaceError;
-      if (!workspace.zernio_api_key_encrypted) throw new Error("Connect this workspace to Zernio first.");
-      const apiKey = decryptSecret(workspace.zernio_api_key_encrypted);
-      const accounts = (workspace.zernio_accounts ?? []) as ZernioAccount[];
+      if (!workspace.zernio_api_key_encrypted && !workspace.zernio_secondary_api_key_encrypted) throw new Error("Connect this workspace to Zernio first.");
       const timezone = workspace.timezone || DEFAULT_TIMEZONE;
       const { data, error } = await supabase.from("schedule_queue").select("*").eq("workspace_id", workspaceId).in("id", queueIds);
       if (error) throw error;
       const results: Array<{ id: string; ok: boolean; error?: string }> = [];
       for (const item of (data ?? []) as QueueItem[]) {
-        try {
-          if (item.zernio_status === "published") throw new Error("Published posts cannot be rescheduled.");
-          const result = (await syncZernioPost(apiKey, item, accounts, timezone)) as {
-            post?: { _id?: string; status?: string };
-            existingPost?: { _id?: string; status?: string };
-          };
-          const post = result.post ?? ("existingPost" in result ? result.existingPost : undefined);
-          const postId = post?._id ?? item.zernio_post_id;
-          if (!postId) throw new Error("Zernio did not return a post ID.");
-          const { error: updateError } = await supabase.from("schedule_queue").update({
-            sync_state: "synced", zernio_post_id: postId, zernio_status: post?.status ?? "scheduled",
-            zernio_last_error: null, sent_to_zernio_at: new Date().toISOString(),
-          }).eq("id", item.id);
-          if (updateError) throw updateError;
-          results.push({ id: item.id, ok: true });
-        } catch (reason) {
-          const message = reason instanceof Error ? reason.message : "Zernio sync failed.";
-          await supabase.from("schedule_queue").update({ sync_state: "error", zernio_last_error: message.slice(0, 1000) }).eq("id", item.id);
-          results.push({ id: item.id, ok: false, error: message });
+        const failures: string[] = [];
+        const deliveries = [
+          workspace.zernio_api_key_encrypted && {
+            slot: "primary" as const,
+            apiKey: decryptSecret(workspace.zernio_api_key_encrypted),
+            accounts: (workspace.zernio_accounts ?? []) as ZernioAccount[],
+            allowedPlatforms: PRIMARY_PLATFORMS,
+            state: item.sync_state,
+            postId: item.zernio_post_id,
+            status: item.zernio_status,
+            requestId: item.zernio_request_id,
+          },
+          workspace.zernio_secondary_api_key_encrypted && {
+            slot: "secondary" as const,
+            apiKey: decryptSecret(workspace.zernio_secondary_api_key_encrypted),
+            accounts: (workspace.zernio_secondary_accounts ?? []) as ZernioAccount[],
+            allowedPlatforms: SECONDARY_PLATFORMS,
+            state: item.secondary_sync_state,
+            postId: item.secondary_zernio_post_id,
+            status: item.secondary_zernio_status,
+            requestId: item.secondary_zernio_request_id,
+          },
+        ].filter(Boolean) as Array<{ slot: "primary" | "secondary"; apiKey: string; accounts: ZernioAccount[]; allowedPlatforms: string[]; state: string; postId: string | null; status: string | null; requestId: string }>;
+
+        for (const delivery of deliveries) {
+          const channel = item.channel.toLowerCase();
+          const requestedPlatform = [...PRIMARY_PLATFORMS, ...SECONDARY_PLATFORMS].find((platform) => channel.includes(platform));
+          const targets = delivery.accounts.filter((account) => delivery.allowedPlatforms.includes(account.platform.toLowerCase()));
+          const applies = requestedPlatform
+            ? targets.some((account) => account.platform.toLowerCase() === requestedPlatform)
+            : targets.length > 0;
+          if (!applies || delivery.state === "synced") continue;
+          try {
+            if (delivery.status === "published") throw new Error("Published posts cannot be rescheduled.");
+            const deliveryItem = { ...item, zernio_post_id: delivery.postId, zernio_request_id: delivery.requestId };
+            const result = await syncZernioPost(delivery.apiKey, deliveryItem, delivery.accounts, timezone, {
+              allowedPlatforms: delivery.allowedPlatforms,
+              pinterestBoardId: workspace.pinterest_board_id,
+            }) as { post?: { _id?: string; status?: string }; existingPost?: { _id?: string; status?: string } };
+            const post = result.post ?? result.existingPost;
+            const postId = post?._id ?? delivery.postId;
+            if (!postId) throw new Error("Zernio did not return a post ID.");
+            const update = delivery.slot === "primary"
+              ? { sync_state: "synced", zernio_post_id: postId, zernio_status: post?.status ?? "scheduled", zernio_last_error: null, sent_to_zernio_at: new Date().toISOString() }
+              : { secondary_sync_state: "synced", secondary_zernio_post_id: postId, secondary_zernio_status: post?.status ?? "scheduled", secondary_zernio_last_error: null, secondary_sent_to_zernio_at: new Date().toISOString() };
+            const { error: updateError } = await supabase.from("schedule_queue").update(update).eq("id", item.id);
+            if (updateError) throw updateError;
+          } catch (reason) {
+            const message = reason instanceof Error ? reason.message : "Zernio sync failed.";
+            const label = delivery.slot === "primary" ? "Facebook / Instagram" : "LinkedIn / Pinterest";
+            const update = delivery.slot === "primary"
+              ? { sync_state: "error", zernio_last_error: message.slice(0, 1000) }
+              : { secondary_sync_state: "error", secondary_zernio_last_error: message.slice(0, 1000) };
+            await supabase.from("schedule_queue").update(update).eq("id", item.id);
+            failures.push(`${label}: ${message}`);
+          }
         }
+        results.push({ id: item.id, ok: failures.length === 0, ...(failures.length ? { error: failures.join(" · ") } : {}) });
       }
       return NextResponse.json({ results });
     }
 
     if (action === "refreshZernio") {
       const workspaceId = id(body.workspaceId, "workspace ID");
-      const { data: workspace, error: workspaceError } = await supabase.from("workspaces").select("zernio_api_key_encrypted").eq("id", workspaceId).single();
+      const { data: workspace, error: workspaceError } = await supabase.from("workspaces").select("zernio_api_key_encrypted,zernio_secondary_api_key_encrypted").eq("id", workspaceId).single();
       if (workspaceError) throw workspaceError;
-      if (!workspace.zernio_api_key_encrypted) throw new Error("This workspace is not connected to Zernio.");
-      const apiKey = decryptSecret(workspace.zernio_api_key_encrypted);
-      const { data, error } = await supabase.from("schedule_queue").select("id,zernio_post_id").eq("workspace_id", workspaceId).not("zernio_post_id", "is", null);
+      if (!workspace.zernio_api_key_encrypted && !workspace.zernio_secondary_api_key_encrypted) throw new Error("This workspace is not connected to Zernio.");
+      const { data, error } = await supabase.from("schedule_queue").select("id,zernio_post_id,secondary_zernio_post_id").eq("workspace_id", workspaceId);
       if (error) throw error;
       let refreshed = 0;
       for (const item of data ?? []) {
-        try {
-          const result = await getZernioPost(apiKey, item.zernio_post_id!);
-          if (result.post?.status) {
-            await supabase.from("schedule_queue").update({ zernio_status: result.post.status, zernio_last_error: null }).eq("id", item.id);
-            refreshed += 1;
+        const checks = [
+          item.zernio_post_id && workspace.zernio_api_key_encrypted && { slot: "primary", postId: item.zernio_post_id, apiKey: decryptSecret(workspace.zernio_api_key_encrypted) },
+          item.secondary_zernio_post_id && workspace.zernio_secondary_api_key_encrypted && { slot: "secondary", postId: item.secondary_zernio_post_id, apiKey: decryptSecret(workspace.zernio_secondary_api_key_encrypted) },
+        ].filter(Boolean) as Array<{ slot: "primary" | "secondary"; postId: string; apiKey: string }>;
+        for (const check of checks) {
+          try {
+            const result = await getZernioPost(check.apiKey, check.postId);
+            if (result.post?.status) {
+              const update = check.slot === "primary"
+                ? { zernio_status: result.post.status, zernio_last_error: null }
+                : { secondary_zernio_status: result.post.status, secondary_zernio_last_error: null };
+              await supabase.from("schedule_queue").update(update).eq("id", item.id);
+              refreshed += 1;
+            }
+          } catch (reason) {
+            const message = reason instanceof Error ? reason.message : "Status check failed.";
+            const update = check.slot === "primary"
+              ? { zernio_last_error: message.slice(0, 1000) }
+              : { secondary_zernio_last_error: message.slice(0, 1000) };
+            await supabase.from("schedule_queue").update(update).eq("id", item.id);
           }
-        } catch (reason) {
-          const message = reason instanceof Error ? reason.message : "Status check failed.";
-          await supabase.from("schedule_queue").update({ zernio_last_error: message.slice(0, 1000) }).eq("id", item.id);
         }
       }
       return NextResponse.json({ refreshed });

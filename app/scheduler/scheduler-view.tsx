@@ -15,7 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { apiRequest } from "@/lib/api-client";
-import type { QueueCadence, QueueItem, Workspace, ZernioAccount } from "@/lib/types";
+import type { QueueCadence, QueueItem, Workspace, ZernioAccount, ZernioBoard, QueueSyncState } from "@/lib/types";
 
 type Props = {
   mode: "queue" | "calendar";
@@ -86,12 +86,51 @@ function calendarDays(month: Date) {
   });
 }
 
-function syncLabel(item: QueueItem) {
-  if (item.zernio_status === "published") return "Published";
-  if (item.sync_state === "synced") return "Scheduled in Zernio";
-  if (item.sync_state === "dirty") return "Changed · resend";
-  if (item.sync_state === "error") return "Zernio error";
+function requestedPlatform(channel: string) {
+  const value = channel.toLowerCase();
+  return ["facebook", "instagram", "linkedin", "pinterest"].find((platform) => value.includes(platform)) ?? null;
+}
+
+function connectionApplies(channel: string, accounts: ZernioAccount[]) {
+  const requested = requestedPlatform(channel);
+  return requested ? accounts.some((account) => account.platform.toLowerCase() === requested) : accounts.length > 0;
+}
+
+function deliveryStates(item: QueueItem, workspace: Workspace) {
+  const states: Array<{ label: string; state: QueueSyncState; status: string | null; postId: string | null }> = [];
+  if (workspace.zernio_configured && connectionApplies(item.channel, workspace.zernio_accounts)) {
+    states.push({ label: "FB / IG", state: item.sync_state, status: item.zernio_status, postId: item.zernio_post_id });
+  }
+  if (workspace.zernio_secondary_configured && connectionApplies(item.channel, workspace.zernio_secondary_accounts)) {
+    states.push({ label: "LI / PIN", state: item.secondary_sync_state, status: item.secondary_zernio_status, postId: item.secondary_zernio_post_id });
+  }
+  if (!states.length) states.push({ label: "Zernio", state: item.sync_state, status: item.zernio_status, postId: item.zernio_post_id });
+  return states;
+}
+
+function overallSyncState(item: QueueItem, workspace: Workspace): QueueSyncState {
+  const states = deliveryStates(item, workspace);
+  if (states.some((entry) => entry.state === "error")) return "error";
+  if (states.some((entry) => entry.state === "dirty")) return "dirty";
+  if (states.every((entry) => entry.state === "synced" || entry.status === "published")) return "synced";
+  return "not_sent";
+}
+
+function syncLabel(item: QueueItem, workspace: Workspace) {
+  const states = deliveryStates(item, workspace);
+  if (states.every((entry) => entry.status === "published")) return "Published to all platforms";
+  const state = overallSyncState(item, workspace);
+  if (state === "synced") return "Scheduled on all platforms";
+  if (state === "dirty") return "Changed · resend";
+  if (state === "error") return "One or more platforms failed";
   return "Not sent to Zernio";
+}
+
+function deliveryError(item: QueueItem) {
+  return [
+    item.zernio_last_error && `Facebook / Instagram: ${item.zernio_last_error}`,
+    item.secondary_zernio_last_error && `LinkedIn / Pinterest: ${item.secondary_zernio_last_error}`,
+  ].filter(Boolean).join(" · ");
 }
 
 function queueTitle(item: QueueItem) {
@@ -130,11 +169,11 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
     if (!value) return;
     await apiRequest("updateQueueSchedule", { id: item.id, scheduledAt: workspaceDateTimeToIso(value, workspace.timezone || DEFAULT_TIMEZONE) });
     await onChanged();
-    flash(item.zernio_post_id ? "Schedule changed — resend it to Zernio when ready" : "Schedule saved");
+    flash(item.zernio_post_id || item.secondary_zernio_post_id ? "Schedule changed — resend it to Zernio when ready" : "Schedule saved");
   }
 
   async function syncAll() {
-    const candidates = queue.filter((item) => item.scheduled_at && item.sync_state !== "synced" && item.zernio_status !== "published");
+    const candidates = queue.filter((item) => item.scheduled_at && overallSyncState(item, workspace) !== "synced");
     if (!candidates.length) return flash("Everything is already synced");
     setBusy(true);
     try {
@@ -183,7 +222,7 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
   }
 
   async function clearUnsentQueue() {
-    const unsentCount = queue.filter((item) => !item.scheduled_at && !item.zernio_post_id).length;
+    const unsentCount = queue.filter((item) => !item.scheduled_at && !item.zernio_post_id && !item.secondary_zernio_post_id).length;
     if (!unsentCount) return flash("There are no unplanned queue items to clear");
     if (!window.confirm(`Remove ${unsentCount} unplanned queue item${unsentCount === 1 ? "" : "s"}? Calendar-plotted and Zernio items will stay.`)) return;
     setBusy(true);
@@ -199,7 +238,7 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
   }
 
   async function publishNow(item: QueueItem) {
-    if (item.zernio_status === "published" || item.zernio_post_id) return;
+    if (item.zernio_status === "published" || item.secondary_zernio_status === "published" || item.zernio_post_id || item.secondary_zernio_post_id) return;
     if (!window.confirm(`Send “${queueTitle(item)}” to Zernio now?`)) return;
     setBusy(true);
     try {
@@ -214,7 +253,7 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
   }
 
   async function retrySchedule(item: QueueItem) {
-    if (item.zernio_status === "published") return;
+    if (item.zernio_status === "published" && item.secondary_zernio_status === "published") return;
     if (!window.confirm(`Retry scheduling “${queueTitle(item)}” in Zernio?`)) return;
     setBusy(true);
     try {
@@ -254,7 +293,7 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
               <button className="secondary-button" disabled={busy || queue.length < 2} onClick={shuffleQueue}>
                 <Shuffle size={16} /> Shuffle order
               </button>
-              <button className="secondary-button" disabled={busy || !queue.some((item) => !item.scheduled_at && !item.zernio_post_id)} onClick={clearUnsentQueue}>
+              <button className="secondary-button" disabled={busy || !queue.some((item) => !item.scheduled_at && !item.zernio_post_id && !item.secondary_zernio_post_id)} onClick={clearUnsentQueue}>
                 <Trash2 size={16} /> Clear unsent
               </button>
               <button className="primary-button" disabled={!orderedQueue.length || busy} onClick={() => setAutoOpen(true)}>
@@ -263,10 +302,10 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
             </>
           ) : (
             <>
-              <button className="secondary-button" disabled={busy || !workspace.zernio_configured} onClick={refreshStatuses}>
+              <button className="secondary-button" disabled={busy || (!workspace.zernio_configured && !workspace.zernio_secondary_configured)} onClick={refreshStatuses}>
                 <RefreshCw size={16} /> Refresh
               </button>
-              <button className="secondary-button" disabled={busy || !queue.some((item) => !item.scheduled_at && !item.zernio_post_id)} onClick={clearUnsentQueue}>
+              <button className="secondary-button" disabled={busy || !queue.some((item) => !item.scheduled_at && !item.zernio_post_id && !item.secondary_zernio_post_id)} onClick={clearUnsentQueue}>
                 <Trash2 size={16} /> Clear unsent
               </button>
               <button className="primary-button" disabled={busy || !queue.some((item) => item.scheduled_at)} onClick={syncAll}>
@@ -284,9 +323,9 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
           <p>Select posts in Approval and move them into this scheduling queue.</p>
         </div>
       ) : mode === "queue" ? (
-        <QueueList queue={orderedQueue} timezone={workspace.timezone || DEFAULT_TIMEZONE} onSave={saveSchedule} onDelete={setDeleteItem} />
+        <QueueList queue={orderedQueue} workspace={workspace} timezone={workspace.timezone || DEFAULT_TIMEZONE} onSave={saveSchedule} onDelete={setDeleteItem} />
       ) : (
-        <CalendarGrid monthItems={orderedQueue} timezone={workspace.timezone || DEFAULT_TIMEZONE} busy={busy} onMove={saveSchedule} onPublishNow={publishNow} onRetry={retrySchedule} />
+        <CalendarGrid monthItems={orderedQueue} workspace={workspace} timezone={workspace.timezone || DEFAULT_TIMEZONE} busy={busy} onMove={saveSchedule} onPublishNow={publishNow} onRetry={retrySchedule} />
       )}
 
       {autoOpen && (
@@ -311,16 +350,19 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
   );
 }
 
-function QueueList({ queue, timezone, onSave, onDelete }: {
+function QueueList({ queue, workspace, timezone, onSave, onDelete }: {
   queue: QueueItem[];
+  workspace: Workspace;
   timezone: string;
   onSave: (item: QueueItem, value: string) => Promise<void>;
   onDelete: (item: QueueItem) => void;
 }) {
   return (
     <div className="queue-list">
-      {queue.map((item) => (
-        <article className="queue-card" key={item.id}>
+      {queue.map((item) => {
+        const state = overallSyncState(item, workspace);
+        const error = deliveryError(item);
+        return <article className="queue-card" key={item.id}>
           <div className="queue-thumb">
             {item.media_url ? (
               item.media_type === "video" ? (
@@ -332,10 +374,13 @@ function QueueList({ queue, timezone, onSave, onDelete }: {
             ) : <CalendarClock size={22} />}
           </div>
           <div className="queue-copy">
-            <span className={`calendar-status sync-${item.sync_state}`}>{syncLabel(item)}</span>
+            <span className={`calendar-status sync-${state}`}>{syncLabel(item, workspace)}</span>
+            <div className="platform-delivery-row">{deliveryStates(item, workspace).map((delivery) => (
+              <small key={delivery.label} className={`delivery-pill sync-${delivery.state}`}>{delivery.label} · {delivery.status === "published" ? "published" : delivery.state === "synced" ? "scheduled" : delivery.state.replace("_", " ")}</small>
+            ))}</div>
             <h3>{queueTitle(item)}</h3>
             <p>{item.channel}</p>
-            {item.zernio_last_error && <small className="queue-error">{item.zernio_last_error}</small>}
+            {error && <small className="queue-error">{error}</small>}
           </div>
           <label className="schedule-field">
             <span><Clock3 size={14} /> Date and time</span>
@@ -350,14 +395,15 @@ function QueueList({ queue, timezone, onSave, onDelete }: {
           <button className="queue-delete" onClick={() => onDelete(item)} aria-label="Remove from queue">
             <Trash2 size={16} />
           </button>
-        </article>
-      ))}
+        </article>;
+      })}
     </div>
   );
 }
 
-function CalendarGrid({ monthItems, timezone, busy, onMove, onPublishNow, onRetry }: {
+function CalendarGrid({ monthItems, workspace, timezone, busy, onMove, onPublishNow, onRetry }: {
   monthItems: QueueItem[];
+  workspace: Workspace;
   timezone: string;
   busy: boolean;
   onMove: (item: QueueItem, value: string) => Promise<void>;
@@ -409,13 +455,15 @@ function CalendarGrid({ monthItems, timezone, busy, onMove, onPublishNow, onRetr
             >
               <time>{day.getDate()}</time>
               <div className="calendar-posts">
-                {(byDay.get(key) ?? []).map((item) => (
-                  <article
+                {(byDay.get(key) ?? []).map((item) => {
+                  const state = overallSyncState(item, workspace);
+                  const canSendNow = !item.zernio_post_id && !item.secondary_zernio_post_id;
+                  return <article
                     draggable
                     key={item.id}
-                    className={`calendar-post sync-${item.sync_state}`}
+                    className={`calendar-post sync-${state}`}
                     onDragStart={(event) => event.dataTransfer.setData("text/queue-id", item.id)}
-                    title={`${queueTitle(item)} · ${syncLabel(item)}`}
+                    title={`${queueTitle(item)} · ${syncLabel(item, workspace)}`}
                   >
                     {item.media_url && (
                       item.media_type === "video" ? (
@@ -426,19 +474,20 @@ function CalendarGrid({ monthItems, timezone, busy, onMove, onPublishNow, onRetr
                     )}
                     <strong>{new Date(item.scheduled_at!).toLocaleTimeString("en", { timeZone: timezone, hour: "numeric", minute: "2-digit" })}</strong>
                     <span>{queueTitle(item)}</span>
-                    <small>{syncLabel(item)}</small>
-                    {item.zernio_status !== "published" && (item.sync_state === "error" || !item.zernio_post_id) && (
+                    <small>{syncLabel(item, workspace)}</small>
+                    <div className="calendar-deliveries">{deliveryStates(item, workspace).map((delivery) => <i key={delivery.label} className={`sync-${delivery.state}`}>{delivery.label}</i>)}</div>
+                    {!(item.zernio_status === "published" && item.secondary_zernio_status === "published") && (state === "error" || canSendNow) && (
                       <button
                         type="button"
                         className="calendar-send-now"
                         disabled={busy}
-                        onClick={(event) => { event.stopPropagation(); void (item.sync_state === "error" ? onRetry(item) : onPublishNow(item)); }}
+                        onClick={(event) => { event.stopPropagation(); void (state === "error" ? onRetry(item) : onPublishNow(item)); }}
                       >
-                        {item.sync_state === "error" ? "Retry" : "Send now"}
+                        {state === "error" ? "Retry" : "Send now"}
                       </button>
                     )}
-                  </article>
-                ))}
+                  </article>;
+                })}
               </div>
             </div>
           );
@@ -520,42 +569,95 @@ function AutoQueueModal({ workspace, queue, onClose, onChanged, flash }: {
 function ZernioSettingsModal({ workspace, onClose, onChanged, flash }: {
   workspace: Workspace; onClose: () => void; onChanged: () => Promise<void>; flash: (message: string) => void;
 }) {
-  const [apiKey, setApiKey] = useState("");
+  const [primaryApiKey, setPrimaryApiKey] = useState("");
+  const [secondaryApiKey, setSecondaryApiKey] = useState("");
   const [timezone, setTimezone] = useState(workspace.timezone || DEFAULT_TIMEZONE);
-  const [accounts, setAccounts] = useState<ZernioAccount[]>(workspace.zernio_accounts);
-  const [selected, setSelected] = useState(workspace.zernio_accounts.map((account) => account.id));
+  const [primaryAccounts, setPrimaryAccounts] = useState<ZernioAccount[]>(workspace.zernio_accounts);
+  const [primarySelected, setPrimarySelected] = useState(workspace.zernio_accounts.map((account) => account.id));
+  const [secondaryAccounts, setSecondaryAccounts] = useState<ZernioAccount[]>(workspace.zernio_secondary_accounts);
+  const [secondarySelected, setSecondarySelected] = useState(workspace.zernio_secondary_accounts.map((account) => account.id));
+  const [boards, setBoards] = useState<ZernioBoard[]>(workspace.pinterest_board_id ? [{ id: workspace.pinterest_board_id, name: workspace.pinterest_board_name || "Saved board" }] : []);
+  const [pinterestBoardId, setPinterestBoardId] = useState(workspace.pinterest_board_id);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  async function load() {
+  async function load(slot: "primary" | "secondary") {
     setBusy(true); setError("");
     try {
-      const result = await apiRequest<{ accounts: ZernioAccount[] }>("loadZernioAccounts", { workspaceId: workspace.id, apiKey });
-      setAccounts(result.accounts);
-      setSelected(result.accounts.map((account) => account.id));
+      const apiKey = slot === "primary" ? primaryApiKey : secondaryApiKey;
+      const result = await apiRequest<{ accounts: ZernioAccount[] }>("loadZernioAccounts", { workspaceId: workspace.id, apiKey, keySlot: slot });
+      if (slot === "primary") {
+        setPrimaryAccounts(result.accounts);
+        setPrimarySelected(result.accounts.map((account) => account.id));
+      } else {
+        setSecondaryAccounts(result.accounts);
+        setSecondarySelected(result.accounts.map((account) => account.id));
+        setBoards([]);
+        setPinterestBoardId("");
+      }
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load accounts."); }
     finally { setBusy(false); }
   }
-  return <ModalShell title="Zernio settings" subtitle="This key and account selection belong only to this workspace." onClose={onClose}>
+  async function loadBoards() {
+    const pinterest = secondaryAccounts.find((account) => secondarySelected.includes(account.id) && account.platform.toLowerCase() === "pinterest");
+    if (!pinterest) return setError("Select a Pinterest account first.");
+    setBusy(true); setError("");
+    try {
+      const result = await apiRequest<{ boards: ZernioBoard[] }>("loadPinterestBoards", { workspaceId: workspace.id, apiKey: secondaryApiKey, accountId: pinterest.id });
+      setBoards(result.boards);
+      if (result.boards.length === 1) setPinterestBoardId(result.boards[0].id);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load Pinterest boards."); }
+    finally { setBusy(false); }
+  }
+  const hasPinterest = secondaryAccounts.some((account) => secondarySelected.includes(account.id) && account.platform.toLowerCase() === "pinterest");
+  return <ModalShell title="Zernio settings" subtitle="Each workspace has separate keys for Facebook / Instagram and LinkedIn / Pinterest." onClose={onClose}>
     <form className="modal-body form-stack" onSubmit={async (event) => {
       event.preventDefault(); setBusy(true); setError("");
       try {
-        await apiRequest("saveZernioConfig", { workspaceId: workspace.id, apiKey, timezone, accountIds: selected });
-        await onChanged(); onClose(); flash("Zernio connection saved securely");
+        const board = boards.find((entry) => entry.id === pinterestBoardId);
+        await apiRequest("saveZernioConfig", {
+          workspaceId: workspace.id,
+          primaryApiKey,
+          secondaryApiKey,
+          timezone,
+          primaryAccountIds: primarySelected,
+          secondaryAccountIds: secondarySelected,
+          pinterestBoardId: hasPinterest ? pinterestBoardId : "",
+          pinterestBoardName: hasPinterest ? (board?.name || workspace.pinterest_board_name) : "",
+        });
+        await onChanged(); onClose(); flash("Both Zernio connections saved securely");
       } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save Zernio settings."); }
       finally { setBusy(false); }
     }}>
-      <label>Zernio API key <small>{workspace.zernio_configured ? "Leave blank to keep the stored key" : "Required"}</small><input type="password" autoComplete="off" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={workspace.zernio_configured ? "Stored securely" : "sk_…"} /></label>
+      <section className="connection-block">
+        <div className="connection-heading"><strong>Facebook + Instagram</strong><small>Primary Zernio key</small></div>
+        <label>API key <small>{workspace.zernio_configured ? "Leave blank to keep the stored key" : "Required"}</small><input type="password" autoComplete="off" value={primaryApiKey} onChange={(event) => setPrimaryApiKey(event.target.value)} placeholder={workspace.zernio_configured ? "Stored securely" : "sk_…"} /></label>
+        <button type="button" className="secondary-button load-accounts" disabled={busy || (!primaryApiKey && !workspace.zernio_configured)} onClick={() => void load("primary")}>{busy ? "Checking…" : "Load Facebook / Instagram accounts"}</button>
+        {primaryAccounts.length > 0 && <AccountPicker accounts={primaryAccounts} selected={primarySelected} onChange={setPrimarySelected} />}
+      </section>
+      <section className="connection-block">
+        <div className="connection-heading"><strong>LinkedIn + Pinterest</strong><small>Second Zernio key</small></div>
+        <label>API key <small>{workspace.zernio_secondary_configured ? "Leave blank to keep the stored key" : "Add the second key"}</small><input type="password" autoComplete="off" value={secondaryApiKey} onChange={(event) => setSecondaryApiKey(event.target.value)} placeholder={workspace.zernio_secondary_configured ? "Stored securely" : "sk_…"} /></label>
+        <button type="button" className="secondary-button load-accounts" disabled={busy || (!secondaryApiKey && !workspace.zernio_secondary_configured)} onClick={() => void load("secondary")}>{busy ? "Checking…" : "Load LinkedIn / Pinterest accounts"}</button>
+        {secondaryAccounts.length > 0 && <AccountPicker accounts={secondaryAccounts} selected={secondarySelected} onChange={setSecondarySelected} />}
+        {hasPinterest && <div className="pinterest-board-setting">
+          <button type="button" className="secondary-button" disabled={busy} onClick={() => void loadBoards()}>{busy ? "Loading…" : "Load Pinterest boards"}</button>
+          <label>Default Pinterest board<select value={pinterestBoardId} onChange={(event) => setPinterestBoardId(event.target.value)}><option value="">Choose a board</option>{boards.map((board) => <option key={board.id} value={board.id}>{board.name}</option>)}</select></label>
+          <p className="modal-hint">Every Pinterest item will be created as a Pin on this board.</p>
+        </div>}
+      </section>
       <label>Workspace timezone<input value={timezone} onChange={(event) => setTimezone(event.target.value)} placeholder="America/Chicago" /></label>
-      <button type="button" className="secondary-button load-accounts" disabled={busy || (!apiKey && !workspace.zernio_configured)} onClick={load}>{busy ? "Checking…" : "Load connected accounts"}</button>
-      {accounts.length > 0 && <div className="account-picker">{accounts.map((account) => <label key={account.id}><input type="checkbox" aria-label={`Use ${account.display_name || account.username || account.platform}`} checked={selected.includes(account.id)} onChange={() => setSelected((current) => current.includes(account.id) ? current.filter((id) => id !== account.id) : [...current, account.id])} /><span><strong>{account.display_name || account.username || account.platform}</strong><small>{account.platform}{account.username ? ` · ${account.username}` : ""}</small></span></label>)}</div>}
-      <p className="modal-hint">Only posts created by this dashboard are tracked or updated. Existing Zernio calendar posts are never modified.</p>
+      <p className="modal-hint">One calendar item creates up to two tracked Zernio posts: one for Facebook / Instagram and one for LinkedIn / Pinterest. Existing Zernio calendar posts are never modified.</p>
       {error && <p className="form-error">{error}</p>}
-      <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={busy || !selected.length}>{busy ? "Saving…" : "Save connection"}</button></div>
+      <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={busy || !primarySelected.length || (hasPinterest && !pinterestBoardId)}>{busy ? "Saving…" : "Save connections"}</button></div>
     </form>
   </ModalShell>;
 }
 
+function AccountPicker({ accounts, selected, onChange }: { accounts: ZernioAccount[]; selected: string[]; onChange: React.Dispatch<React.SetStateAction<string[]>> }) {
+  return <div className="account-picker">{accounts.map((account) => <label key={account.id}><input type="checkbox" aria-label={`Use ${account.display_name || account.username || account.platform}`} checked={selected.includes(account.id)} onChange={() => onChange((current) => current.includes(account.id) ? current.filter((id) => id !== account.id) : [...current, account.id])} /><span><strong>{account.display_name || account.username || account.platform}</strong><small>{account.platform}{account.username ? ` · ${account.username}` : ""}</small></span></label>)}</div>;
+}
+
 function ConfirmQueueDelete({ item, onClose, onDelete }: { item: QueueItem; onClose: () => void; onDelete: () => Promise<void> }) {
   const [busy, setBusy] = useState(false);
-  return <ModalShell title="Remove from queue?" subtitle="The approval copy will not be affected." onClose={onClose}><div className="modal-body delete-confirm"><p><strong>{queueTitle(item)}</strong> will be removed from this scheduler. {item.zernio_post_id && "Its existing Zernio post will stay untouched."}</p><div className="modal-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="danger-button" disabled={busy} onClick={async () => { setBusy(true); await onDelete(); }}>{busy ? "Removing…" : "Yes, remove from queue"}</button></div></div></ModalShell>;
+  return <ModalShell title="Remove from queue?" subtitle="The approval copy will not be affected." onClose={onClose}><div className="modal-body delete-confirm"><p><strong>{queueTitle(item)}</strong> will be removed from this scheduler. {(item.zernio_post_id || item.secondary_zernio_post_id) && "Its existing Zernio posts will stay untouched."}</p><div className="modal-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="danger-button" disabled={busy} onClick={async () => { setBusy(true); await onDelete(); }}>{busy ? "Removing…" : "Yes, remove from queue"}</button></div></div></ModalShell>;
 }

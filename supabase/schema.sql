@@ -37,6 +37,10 @@ alter table public.workspaces
   add column if not exists timezone text not null default 'America/Chicago',
   add column if not exists zernio_api_key_encrypted text,
   add column if not exists zernio_accounts jsonb not null default '[]'::jsonb,
+  add column if not exists zernio_secondary_api_key_encrypted text,
+  add column if not exists zernio_secondary_accounts jsonb not null default '[]'::jsonb,
+  add column if not exists pinterest_board_id text not null default '',
+  add column if not exists pinterest_board_name text not null default '',
   add column if not exists auto_queue_cadence jsonb not null default
     '{"frequency":"weekdays","weekdays":[1,2,3,4,5],"times":["09:00"],"start_date":""}'::jsonb;
 
@@ -59,6 +63,13 @@ create table if not exists public.schedule_queue (
   zernio_last_error text,
   zernio_request_id uuid not null default gen_random_uuid(),
   sent_to_zernio_at timestamptz,
+  secondary_sync_state text not null default 'not_sent'
+    check (secondary_sync_state in ('not_sent', 'dirty', 'synced', 'error')),
+  secondary_zernio_post_id text,
+  secondary_zernio_status text,
+  secondary_zernio_last_error text,
+  secondary_zernio_request_id uuid not null default gen_random_uuid(),
+  secondary_sent_to_zernio_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique (workspace_id, source_content_id)
@@ -71,6 +82,9 @@ create index if not exists schedule_queue_workspace_schedule_idx
 create index if not exists schedule_queue_zernio_post_idx
   on public.schedule_queue(zernio_post_id)
   where zernio_post_id is not null;
+create index if not exists schedule_queue_secondary_zernio_post_idx
+  on public.schedule_queue(secondary_zernio_post_id)
+  where secondary_zernio_post_id is not null;
 
 alter table public.workspaces enable row level security;
 alter table public.content_items enable row level security;

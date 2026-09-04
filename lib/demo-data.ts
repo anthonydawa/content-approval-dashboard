@@ -11,6 +11,13 @@ export const demoWorkspaces: Workspace[] = [{
     { id: "demo-instagram", platform: "instagram", username: "juniperstudio", display_name: "Juniper Studio" },
     { id: "demo-facebook", platform: "facebook", username: "juniperstudio", display_name: "Juniper Studio" },
   ],
+  zernio_secondary_configured: true,
+  zernio_secondary_accounts: [
+    { id: "demo-linkedin", platform: "linkedin", username: "juniper-studio", display_name: "Juniper Studio" },
+    { id: "demo-pinterest", platform: "pinterest", username: "juniperstudio", display_name: "Juniper Studio" },
+  ],
+  pinterest_board_id: "demo-board",
+  pinterest_board_name: "Juniper Ideas",
   auto_queue_cadence: { frequency: "custom", weekdays: [2, 4, 6], times: ["09:00"], start_date: "2026-09-01" },
 }];
 
@@ -59,6 +66,12 @@ export const demoQueue: QueueItem[] = demoContent.map((item, index) => ({
   zernio_last_error: null,
   zernio_request_id: `demo-request-${index + 1}`,
   sent_to_zernio_at: index === 1 ? null : "2026-08-30T12:00:00Z",
+  secondary_sync_state: index === 1 ? "not_sent" : "synced",
+  secondary_zernio_post_id: index === 1 ? null : `demo-zernio-social-${index + 1}`,
+  secondary_zernio_status: index === 1 ? null : "scheduled",
+  secondary_zernio_last_error: null,
+  secondary_zernio_request_id: `demo-request-social-${index + 1}`,
+  secondary_sent_to_zernio_at: index === 1 ? null : "2026-08-30T12:00:00Z",
   created_at: "2026-08-28T12:00:00Z",
   updated_at: "2026-08-30T12:00:00Z",
 }));
