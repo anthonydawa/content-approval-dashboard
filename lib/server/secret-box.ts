@@ -23,7 +23,7 @@ export function encryptSecret(value: string) {
 export function decryptSecret(value: string) {
   const [version, ivValue, tagValue, encryptedValue] = value.split(".");
   if (version !== "v1" || !ivValue || !tagValue || !encryptedValue) {
-    throw new Error("The stored Zernio key is invalid.");
+    throw new Error("The stored encrypted value is invalid.");
   }
   const decipher = createDecipheriv(
     "aes-256-gcm",

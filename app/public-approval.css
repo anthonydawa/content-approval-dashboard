@@ -1,0 +1,18 @@
+.public-review-shell{min-height:100vh;background:var(--paper)}
+.public-review-topbar{height:72px;padding:0 max(24px,calc((100vw - 1120px)/2));display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);background:rgba(245,242,234,.94);backdrop-filter:blur(10px);position:sticky;top:0;z-index:20}
+.public-review-brand{font-family:var(--font-display),serif;font-size:24px;font-weight:650;display:flex;align-items:center;gap:8px}
+.public-review-secure{font-size:10px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:var(--green);background:var(--soft-green);padding:8px 11px;border-radius:20px}
+.public-review-wrap{max-width:1120px;margin:0 auto;padding:54px 44px 28px}
+.public-review-intro{display:flex;align-items:flex-end;justify-content:space-between;gap:46px;margin-bottom:48px}
+.public-review-intro h1{font-family:var(--font-display),serif;font-size:42px;line-height:1.04;letter-spacing:-.035em;margin:0}
+.public-review-intro h1 span{font-weight:350;font-style:italic}
+.public-review-intro>div>p{color:var(--muted);max-width:690px;margin:15px 0 0;font-size:14px;line-height:1.65}
+.public-review-heading{align-items:center}
+.public-review-invalid{display:grid;place-items:center;padding:24px}
+.public-review-invalid-card{max-width:500px;background:#fff;border:1px solid var(--line);border-radius:18px;padding:48px;text-align:center;box-shadow:0 14px 50px rgba(29,49,41,.08)}
+.public-review-invalid-card .brand-mark{margin:0 auto 20px;color:#fff}
+.public-review-invalid-card h1{font-family:var(--font-display),serif;font-size:32px;margin:0 0 12px}
+.public-review-invalid-card p{color:var(--muted);font-size:13px;line-height:1.6;margin:0}
+.public-upload-zone{cursor:pointer}
+.public-upload-zone input{display:none}
+@media(max-width:760px){.public-review-topbar{height:64px;padding:0 16px}.public-review-secure{font-size:8px}.public-review-wrap{padding:36px 15px 22px}.public-review-intro{display:block;margin-bottom:35px}.public-review-intro h1{font-size:34px}.public-review-intro .progress-card{margin-top:24px}.public-review-invalid-card{padding:36px 24px}}

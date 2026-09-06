@@ -1,6 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { decryptSecret, encryptSecret } from "@/lib/server/secret-box";
+import { approvalTokenHash } from "@/lib/server/public-approval";
 import { assertSameOrigin, requireSession } from "@/lib/server/session";
 import { getServerSupabase } from "@/lib/server/supabase-admin";
 import { getZernioPost, listPinterestBoards, listZernioAccounts, listZernioPosts, publishZernioPost, syncZernioPost, type ZernioPost } from "@/lib/server/zernio";
@@ -109,17 +110,28 @@ export async function GET() {
   try {
     await requireSession();
     const supabase = getServerSupabase();
-    const [workspaceResult, batchResult, contentResult, queueResult] = await Promise.all([
+    const [workspaceResult, batchResult, linkResult, contentResult, queueResult] = await Promise.all([
       supabase.from("workspaces").select("id,name,initials,color,timezone,zernio_api_key_encrypted,zernio_accounts,zernio_secondary_api_key_encrypted,zernio_secondary_accounts,pinterest_board_id,pinterest_board_name,auto_queue_cadence").order("created_at"),
       supabase.from("approval_batches").select("id,workspace_id,name,created_at").order("created_at", { ascending: false }),
+      supabase.from("approval_batch_links").select("batch_id,token_encrypted"),
       supabase.from("content_items").select("id,workspace_id,approval_batch_id,title,caption,media_url,media_type,channel,scheduled_for,status,position,comments(id,content_id,author,body,created_at)").order("position"),
       supabase.from("schedule_queue").select("id,workspace_id,source_content_id,title,caption,media_url,media_type,channel,scheduled_at,sync_state,zernio_post_id,zernio_status,zernio_last_error,zernio_request_id,sent_to_zernio_at,secondary_sync_state,secondary_zernio_post_id,secondary_zernio_status,secondary_zernio_last_error,secondary_zernio_request_id,secondary_sent_to_zernio_at,created_at,updated_at").order("scheduled_at", { nullsFirst: false }).order("created_at"),
     ]);
-    const error = workspaceResult.error || batchResult.error || contentResult.error || queueResult.error;
+    const error = workspaceResult.error || batchResult.error || linkResult.error || contentResult.error || queueResult.error;
     if (error) throw error;
+    const tokens = new Map<string, string | null>((linkResult.data ?? []).map((link): [string, string | null] => {
+      try {
+        return [String(link.batch_id), decryptSecret(String(link.token_encrypted))];
+      } catch {
+        return [String(link.batch_id), null];
+      }
+    }));
     return NextResponse.json({
       workspaces: (workspaceResult.data ?? []).map((row) => workspaceDto(row)),
-      batches: batchResult.data ?? [],
+      batches: (batchResult.data ?? []).map((batch) => ({
+        ...batch,
+        approval_token: tokens.get(String(batch.id)) ?? null,
+      })),
       content: contentResult.data ?? [],
       queue: queueResult.data ?? [],
     });
@@ -175,6 +187,37 @@ export async function POST(request: Request) {
         .eq("id", batchId).eq("workspace_id", workspaceId).select("id").maybeSingle();
       if (error) throw error;
       if (!data) throw new Error("This approval batch was not found.");
+      return NextResponse.json({ ok: true });
+    }
+
+    if (action === "generateApprovalLink") {
+      const workspaceId = id(body.workspaceId, "workspace ID");
+      const batchId = id(body.batchId, "batch ID");
+      const { data: batch, error: batchError } = await supabase.from("approval_batches")
+        .select("id").eq("id", batchId).eq("workspace_id", workspaceId).maybeSingle();
+      if (batchError) throw batchError;
+      if (!batch) throw new Error("This approval batch was not found.");
+      const token = randomBytes(32).toString("base64url");
+      const now = new Date().toISOString();
+      const { error } = await supabase.from("approval_batch_links").upsert({
+        batch_id: batchId,
+        token_hash: approvalTokenHash(token),
+        token_encrypted: encryptSecret(token),
+        updated_at: now,
+      }, { onConflict: "batch_id" });
+      if (error) throw error;
+      return NextResponse.json({ token });
+    }
+
+    if (action === "disableApprovalLink") {
+      const workspaceId = id(body.workspaceId, "workspace ID");
+      const batchId = id(body.batchId, "batch ID");
+      const { data: batch, error: batchError } = await supabase.from("approval_batches")
+        .select("id").eq("id", batchId).eq("workspace_id", workspaceId).maybeSingle();
+      if (batchError) throw batchError;
+      if (!batch) throw new Error("This approval batch was not found.");
+      const { error } = await supabase.from("approval_batch_links").delete().eq("batch_id", batchId);
+      if (error) throw error;
       return NextResponse.json({ ok: true });
     }
 

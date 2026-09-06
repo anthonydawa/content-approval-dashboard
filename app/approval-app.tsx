@@ -9,10 +9,12 @@ import {
   ChevronDown,
   CirclePlus,
   Clock3,
+  Copy,
   ImagePlus,
   MessageCircle,
   MoreHorizontal,
   ListChecks,
+  Link2,
   LogOut,
   Pencil,
   Play,
@@ -90,6 +92,7 @@ export default function ApprovalApp() {
   const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
   const [newBatchOpen, setNewBatchOpen] = useState(false);
   const [deleteBatch, setDeleteBatch] = useState<ApprovalBatch | null>(null);
+  const [shareBatch, setShareBatch] = useState<ApprovalBatch | null>(null);
   const [addContentOpen, setAddContentOpen] = useState(false);
   const [bulkUploadOpen, setBulkUploadOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -274,6 +277,42 @@ export default function ApprovalApp() {
     setCommentOpen(null);
     setDeleteBatch(null);
     flash(`${batch.name} deleted`);
+  }
+
+  async function openApprovalLink(batch: ApprovalBatch) {
+    if (batch.approval_token) {
+      setShareBatch(batch);
+      return;
+    }
+    try {
+      const result = await apiRequest<{ token: string }>("generateApprovalLink", {
+        workspaceId: batch.workspace_id,
+        batchId: batch.id,
+      });
+      const updated = { ...batch, approval_token: result.token };
+      setBatches((current) => current.map((entry) => entry.id === batch.id ? updated : entry));
+      setShareBatch(updated);
+    } catch (reason) {
+      flash(reason instanceof Error ? reason.message : "Could not create the approval link.");
+    }
+  }
+
+  async function resetApprovalLink(batch: ApprovalBatch) {
+    const result = await apiRequest<{ token: string }>("generateApprovalLink", {
+      workspaceId: batch.workspace_id,
+      batchId: batch.id,
+    });
+    const updated = { ...batch, approval_token: result.token };
+    setBatches((current) => current.map((entry) => entry.id === batch.id ? updated : entry));
+    setShareBatch(updated);
+    flash("A new approval link was created");
+  }
+
+  async function disableApprovalLink(batch: ApprovalBatch) {
+    await apiRequest("disableApprovalLink", { workspaceId: batch.workspace_id, batchId: batch.id });
+    setBatches((current) => current.map((entry) => entry.id === batch.id ? { ...entry, approval_token: null } : entry));
+    setShareBatch(null);
+    flash("Approval link disabled");
   }
 
   async function addContent(data: {
@@ -590,9 +629,14 @@ export default function ApprovalApp() {
                   <Plus size={15} /> New batch
                 </button>
                 {activeBatchRecord && (
-                  <button className="batch-delete-button" onClick={() => setDeleteBatch(activeBatchRecord)}>
-                    <Trash2 size={15} /> Delete batch
-                  </button>
+                  <>
+                    <button className="secondary-button" onClick={() => void openApprovalLink(activeBatchRecord)}>
+                      <Link2 size={15} /> {activeBatchRecord.approval_token ? "Copy approval link" : "Create approval link"}
+                    </button>
+                    <button className="batch-delete-button" onClick={() => setDeleteBatch(activeBatchRecord)}>
+                      <Trash2 size={15} /> Delete batch
+                    </button>
+                  </>
                 )}
               </div>
               <p>{activeBatchRecord ? `${visibleItems.length} posts ready for review` : "Create a batch to begin"}</p>
@@ -739,6 +783,15 @@ export default function ApprovalApp() {
           postCount={items.filter((item) => item.approval_batch_id === deleteBatch.id).length}
           onClose={() => setDeleteBatch(null)}
           onDelete={deleteApprovalBatch}
+        />
+      )}
+      {shareBatch?.approval_token && (
+        <ApprovalLinkModal
+          batch={shareBatch}
+          token={shareBatch.approval_token}
+          onClose={() => setShareBatch(null)}
+          onReset={resetApprovalLink}
+          onDisable={disableApprovalLink}
         />
       )}
       {addContentOpen && (
@@ -1201,6 +1254,80 @@ function DeleteBatchModal({
             }}
           >
             {deleting ? "Deleting…" : "Yes, delete batch"}
+          </button>
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
+function ApprovalLinkModal({
+  batch,
+  token,
+  onClose,
+  onReset,
+  onDisable,
+}: {
+  batch: ApprovalBatch;
+  token: string;
+  onClose: () => void;
+  onReset: (batch: ApprovalBatch) => Promise<void>;
+  onDisable: (batch: ApprovalBatch) => Promise<void>;
+}) {
+  const [copied, setCopied] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const approvalUrl = typeof window === "undefined"
+    ? `/approve/${token}`
+    : `${window.location.origin}/approve/${token}`;
+  return (
+    <ModalShell
+      title={`Share ${batch.name}`}
+      subtitle="Anyone with this private link can review only this approval batch."
+      onClose={onClose}
+    >
+      <div className="modal-body">
+        <label className="share-link-field">
+          Client approval link
+          <span className="share-link-row">
+            <input value={approvalUrl} readOnly onFocus={(event) => event.currentTarget.select()} />
+            <button
+              className="primary-button"
+              onClick={async () => {
+                await navigator.clipboard.writeText(approvalUrl);
+                setCopied(true);
+                window.setTimeout(() => setCopied(false), 1800);
+              }}
+            >
+              <Copy size={15} /> {copied ? "Copied" : "Copy"}
+            </button>
+          </span>
+        </label>
+        <p className="modal-hint">The client can approve, comment, edit, replace media, and delete posts in this batch. The queue, calendar, other batches, settings, and Zernio controls are not available from this link.</p>
+        {error && <p className="form-error">{error}</p>}
+        <div className="share-link-secondary-actions">
+          <button className="secondary-button" onClick={() => window.open(approvalUrl, "_blank", "noopener,noreferrer")}>Open link <ArrowUpRight size={15} /></button>
+          <button
+            className="secondary-button"
+            disabled={saving}
+            onClick={async () => {
+              if (!window.confirm("Create a new link? The current client link will stop working.")) return;
+              setSaving(true); setError("");
+              try { await onReset(batch); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not create a new link."); } finally { setSaving(false); }
+            }}
+          >
+            {saving ? "Creating…" : "Create new link"}
+          </button>
+          <button
+            className="batch-delete-button"
+            disabled={saving}
+            onClick={async () => {
+              if (!window.confirm("Disable this client approval link?")) return;
+              setSaving(true); setError("");
+              try { await onDisable(batch); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not disable the link."); setSaving(false); }
+            }}
+          >
+            Disable link
           </button>
         </div>
       </div>

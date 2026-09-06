@@ -3,10 +3,13 @@ export const MEDIA_ACCEPT = "image/jpeg,image/png,image/webp,image/gif,video/mp4
 
 type UploadResult = { uploadUrl: string; publicUrl: string };
 
-export async function uploadToR2(file: File, workspaceId: string, contentId: string) {
+export async function uploadToR2(file: File, workspaceId: string, contentId: string, approvalToken?: string) {
   if (file.size > MAX_MEDIA_BYTES) throw new Error("Choose a file that is 90 MB or smaller.");
 
-  const response = await fetch("/api/media/upload-url", {
+  const endpoint = approvalToken
+    ? `/api/public/approval/${encodeURIComponent(approvalToken)}/upload-url`
+    : "/api/media/upload-url";
+  const response = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ workspaceId, contentId, contentType: file.type, size: file.size }),

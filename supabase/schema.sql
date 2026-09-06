@@ -37,6 +37,15 @@ create table if not exists public.content_items (
   )
 );
 
+create table if not exists public.approval_batch_links (
+  id uuid primary key default gen_random_uuid(),
+  batch_id uuid not null unique references public.approval_batches(id) on delete cascade,
+  token_hash text not null unique check (char_length(token_hash) = 64),
+  token_encrypted text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 create table if not exists public.comments (
   id uuid primary key default gen_random_uuid(),
   content_id uuid not null references public.content_items(id) on delete cascade,
@@ -92,6 +101,8 @@ create table if not exists public.schedule_queue (
 );
 
 create index if not exists content_items_workspace_id_idx on public.content_items(workspace_id);
+create index if not exists approval_batch_links_token_hash_idx
+  on public.approval_batch_links(token_hash);
 create index if not exists approval_batches_workspace_created_idx
   on public.approval_batches(workspace_id, created_at desc);
 create index if not exists content_items_batch_position_idx
@@ -108,6 +119,7 @@ create index if not exists schedule_queue_secondary_zernio_post_idx
 
 alter table public.workspaces enable row level security;
 alter table public.approval_batches enable row level security;
+alter table public.approval_batch_links enable row level security;
 alter table public.content_items enable row level security;
 alter table public.comments enable row level security;
 alter table public.schedule_queue enable row level security;
@@ -167,10 +179,11 @@ grant execute on function private.app_request_authorized() to anon, authenticate
 grant execute on function private.check_app_request() to anon, authenticated, service_role;
 
 -- New Supabase projects require explicit Data API grants.
-revoke all on table public.workspaces, public.approval_batches, public.content_items, public.comments, public.schedule_queue
+revoke all on table public.workspaces, public.approval_batches, public.approval_batch_links, public.content_items, public.comments, public.schedule_queue
   from anon, authenticated;
 grant select, insert, update, delete on table public.workspaces to anon;
 grant select, insert, update, delete on table public.approval_batches to anon;
+grant select, insert, update, delete on table public.approval_batch_links to anon;
 grant select, insert, update, delete on table public.content_items to anon;
 grant select, insert, update, delete on table public.comments to anon;
 grant select, insert, update, delete on table public.schedule_queue to anon;
@@ -178,6 +191,7 @@ grant select, insert, update, delete on table public.schedule_queue to anon;
 drop policy if exists "testing access workspaces" on public.workspaces;
 drop policy if exists "testing access content" on public.content_items;
 drop policy if exists "server access approval batches" on public.approval_batches;
+drop policy if exists "server access approval batch links" on public.approval_batch_links;
 drop policy if exists "testing access comments" on public.comments;
 drop policy if exists "server access workspaces" on public.workspaces;
 drop policy if exists "server access content" on public.content_items;
@@ -187,6 +201,9 @@ create policy "server access workspaces" on public.workspaces for all to anon
   using ((select private.app_request_authorized()))
   with check ((select private.app_request_authorized()));
 create policy "server access approval batches" on public.approval_batches for all to anon
+  using ((select private.app_request_authorized()))
+  with check ((select private.app_request_authorized()));
+create policy "server access approval batch links" on public.approval_batch_links for all to anon
   using ((select private.app_request_authorized()))
   with check ((select private.app_request_authorized()));
 create policy "server access content" on public.content_items for all to anon

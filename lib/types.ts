@@ -20,6 +20,13 @@ export type ApprovalBatch = {
   workspace_id: string;
   name: string;
   created_at: string;
+  approval_token?: string | null;
+};
+
+export type PublicApprovalData = {
+  workspace: Pick<Workspace, "id" | "name" | "initials" | "color">;
+  batch: Pick<ApprovalBatch, "id" | "name" | "created_at">;
+  content: ContentItem[];
 };
 
 export type Comment = {

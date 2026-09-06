@@ -30,7 +30,7 @@ function secureHeaders(response: NextResponse) {
 
 export function proxy(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
-  const isPublic = pathname === "/login" || pathname === "/demo" || pathname === "/demo/" || pathname === "/api/auth/login";
+  const isPublic = pathname === "/login" || pathname === "/demo" || pathname === "/demo/" || pathname === "/api/auth/login" || pathname.startsWith("/approve/") || pathname.startsWith("/api/public/approval/");
   const authenticated = validToken(request.cookies.get(COOKIE)?.value);
   if (!authenticated && !isPublic) {
     if (pathname.startsWith("/api/")) {
@@ -43,7 +43,12 @@ export function proxy(request: NextRequest) {
   if (authenticated && pathname === "/login") {
     return secureHeaders(NextResponse.redirect(new URL("/", request.url)));
   }
-  return secureHeaders(NextResponse.next());
+  const response = secureHeaders(NextResponse.next());
+  if (pathname.startsWith("/approve/") || pathname.startsWith("/api/public/approval/")) {
+    response.headers.set("Referrer-Policy", "no-referrer");
+    response.headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
+  }
+  return response;
 }
 
 export const config = {
