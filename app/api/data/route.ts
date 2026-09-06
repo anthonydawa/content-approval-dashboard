@@ -4,7 +4,7 @@ import { decryptSecret, encryptSecret } from "@/lib/server/secret-box";
 import { assertSameOrigin, requireSession } from "@/lib/server/session";
 import { getServerSupabase } from "@/lib/server/supabase-admin";
 import { getZernioPost, listPinterestBoards, listZernioAccounts, listZernioPosts, publishZernioPost, syncZernioPost, type ZernioPost } from "@/lib/server/zernio";
-import type { QueueCadence, QueueItem, Workspace, ZernioAccount } from "@/lib/types";
+import type { ApprovalBatch, QueueCadence, QueueItem, Workspace, ZernioAccount } from "@/lib/types";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DEFAULT_TIMEZONE = "America/Chicago";
@@ -109,15 +109,17 @@ export async function GET() {
   try {
     await requireSession();
     const supabase = getServerSupabase();
-    const [workspaceResult, contentResult, queueResult] = await Promise.all([
+    const [workspaceResult, batchResult, contentResult, queueResult] = await Promise.all([
       supabase.from("workspaces").select("id,name,initials,color,timezone,zernio_api_key_encrypted,zernio_accounts,zernio_secondary_api_key_encrypted,zernio_secondary_accounts,pinterest_board_id,pinterest_board_name,auto_queue_cadence").order("created_at"),
-      supabase.from("content_items").select("id,workspace_id,title,caption,media_url,media_type,channel,scheduled_for,status,position,comments(id,content_id,author,body,created_at)").order("position"),
+      supabase.from("approval_batches").select("id,workspace_id,name,created_at").order("created_at", { ascending: false }),
+      supabase.from("content_items").select("id,workspace_id,approval_batch_id,title,caption,media_url,media_type,channel,scheduled_for,status,position,comments(id,content_id,author,body,created_at)").order("position"),
       supabase.from("schedule_queue").select("id,workspace_id,source_content_id,title,caption,media_url,media_type,channel,scheduled_at,sync_state,zernio_post_id,zernio_status,zernio_last_error,zernio_request_id,sent_to_zernio_at,secondary_sync_state,secondary_zernio_post_id,secondary_zernio_status,secondary_zernio_last_error,secondary_zernio_request_id,secondary_sent_to_zernio_at,created_at,updated_at").order("scheduled_at", { nullsFirst: false }).order("created_at"),
     ]);
-    const error = workspaceResult.error || contentResult.error || queueResult.error;
+    const error = workspaceResult.error || batchResult.error || contentResult.error || queueResult.error;
     if (error) throw error;
     return NextResponse.json({
       workspaces: (workspaceResult.data ?? []).map((row) => workspaceDto(row)),
+      batches: batchResult.data ?? [],
       content: contentResult.data ?? [],
       queue: queueResult.data ?? [],
     });
@@ -147,7 +149,33 @@ export async function POST(request: Request) {
       };
       const { error } = await supabase.from("workspaces").insert(row);
       if (error) throw error;
-      return NextResponse.json({ workspace: workspaceDto(row) });
+      const batch: ApprovalBatch = { id: randomUUID(), workspace_id: row.id, name: "Batch 1", created_at: new Date().toISOString() };
+      const { error: batchError } = await supabase.from("approval_batches").insert(batch);
+      if (batchError) {
+        await supabase.from("workspaces").delete().eq("id", row.id);
+        throw batchError;
+      }
+      return NextResponse.json({ workspace: workspaceDto(row), batch });
+    }
+
+    if (action === "createApprovalBatch") {
+      const workspaceId = id(body.workspaceId, "workspace ID");
+      const name = text(body.name, 80);
+      if (!name) throw new Error("Enter a batch name.");
+      const batch: ApprovalBatch = { id: randomUUID(), workspace_id: workspaceId, name, created_at: new Date().toISOString() };
+      const { data, error } = await supabase.from("approval_batches").insert(batch).select("id,workspace_id,name,created_at").single();
+      if (error) throw error;
+      return NextResponse.json({ batch: data });
+    }
+
+    if (action === "deleteApprovalBatch") {
+      const workspaceId = id(body.workspaceId, "workspace ID");
+      const batchId = id(body.batchId, "batch ID");
+      const { data, error } = await supabase.from("approval_batches").delete()
+        .eq("id", batchId).eq("workspace_id", workspaceId).select("id").maybeSingle();
+      if (error) throw error;
+      if (!data) throw new Error("This approval batch was not found.");
+      return NextResponse.json({ ok: true });
     }
 
     if (action === "updateStatus") {
@@ -175,10 +203,15 @@ export async function POST(request: Request) {
       const rowsInput = action === "bulkAddContent" ? body.items : [body.item];
       if (!Array.isArray(rowsInput) || !rowsInput.length || rowsInput.length > 250) throw new Error("Choose between 1 and 250 content items.");
       const workspaceId = id(body.workspaceId, "workspace ID");
+      const batchId = id(body.batchId, "batch ID");
+      const { data: batch, error: batchError } = await supabase.from("approval_batches")
+        .select("id").eq("id", batchId).eq("workspace_id", workspaceId).maybeSingle();
+      if (batchError) throw batchError;
+      if (!batch) throw new Error("Choose a valid approval batch.");
       const rows = rowsInput.map((entry, index) => {
         const value = (entry ?? {}) as Record<string, unknown>;
         return {
-          id: id(value.id), workspace_id: workspaceId,
+          id: id(value.id), workspace_id: workspaceId, approval_batch_id: batchId,
           title: text(value.title, 180), caption: text(value.caption, 10000),
           media_url: validMediaUrl(value.media_url), media_type: value.media_type === "video" ? "video" : "image",
           channel: text(value.channel, 50, "All platforms") || "All platforms",

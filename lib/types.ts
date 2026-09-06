@@ -15,6 +15,13 @@ export type Workspace = {
   auto_queue_cadence: QueueCadence;
 };
 
+export type ApprovalBatch = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  created_at: string;
+};
+
 export type Comment = {
   id: string;
   content_id: string;
@@ -26,6 +33,7 @@ export type Comment = {
 export type ContentItem = {
   id: string;
   workspace_id: string;
+  approval_batch_id: string;
   title: string;
   caption: string;
   media_url: string;
@@ -86,6 +94,7 @@ export type QueueItem = {
 
 export type DashboardData = {
   workspaces: Workspace[];
+  batches: ApprovalBatch[];
   content: ContentItem[];
   queue: QueueItem[];
 };

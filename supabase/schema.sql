@@ -11,9 +11,17 @@ create table if not exists public.workspaces (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.approval_batches (
+  id uuid primary key default gen_random_uuid(),
+  workspace_id uuid not null references public.workspaces(id) on delete cascade,
+  name text not null check (char_length(name) between 1 and 80),
+  created_at timestamptz not null default now()
+);
+
 create table if not exists public.content_items (
   id uuid primary key default gen_random_uuid(),
   workspace_id uuid not null references public.workspaces(id) on delete cascade,
+  approval_batch_id uuid not null references public.approval_batches(id) on delete cascade,
   title text not null,
   caption text not null default '',
   media_url text not null,
@@ -76,6 +84,10 @@ create table if not exists public.schedule_queue (
 );
 
 create index if not exists content_items_workspace_id_idx on public.content_items(workspace_id);
+create index if not exists approval_batches_workspace_created_idx
+  on public.approval_batches(workspace_id, created_at desc);
+create index if not exists content_items_batch_position_idx
+  on public.content_items(approval_batch_id, position);
 create index if not exists comments_content_id_idx on public.comments(content_id);
 create index if not exists schedule_queue_workspace_schedule_idx
   on public.schedule_queue(workspace_id, scheduled_at);
@@ -87,6 +99,7 @@ create index if not exists schedule_queue_secondary_zernio_post_idx
   where secondary_zernio_post_id is not null;
 
 alter table public.workspaces enable row level security;
+alter table public.approval_batches enable row level security;
 alter table public.content_items enable row level security;
 alter table public.comments enable row level security;
 alter table public.schedule_queue enable row level security;
@@ -146,21 +159,26 @@ grant execute on function private.app_request_authorized() to anon, authenticate
 grant execute on function private.check_app_request() to anon, authenticated, service_role;
 
 -- New Supabase projects require explicit Data API grants.
-revoke all on table public.workspaces, public.content_items, public.comments, public.schedule_queue
+revoke all on table public.workspaces, public.approval_batches, public.content_items, public.comments, public.schedule_queue
   from anon, authenticated;
 grant select, insert, update, delete on table public.workspaces to anon;
+grant select, insert, update, delete on table public.approval_batches to anon;
 grant select, insert, update, delete on table public.content_items to anon;
 grant select, insert, update, delete on table public.comments to anon;
 grant select, insert, update, delete on table public.schedule_queue to anon;
 
 drop policy if exists "testing access workspaces" on public.workspaces;
 drop policy if exists "testing access content" on public.content_items;
+drop policy if exists "server access approval batches" on public.approval_batches;
 drop policy if exists "testing access comments" on public.comments;
 drop policy if exists "server access workspaces" on public.workspaces;
 drop policy if exists "server access content" on public.content_items;
 drop policy if exists "server access comments" on public.comments;
 drop policy if exists "server access schedule queue" on public.schedule_queue;
 create policy "server access workspaces" on public.workspaces for all to anon
+  using ((select private.app_request_authorized()))
+  with check ((select private.app_request_authorized()));
+create policy "server access approval batches" on public.approval_batches for all to anon
   using ((select private.app_request_authorized()))
   with check ((select private.app_request_authorized()));
 create policy "server access content" on public.content_items for all to anon

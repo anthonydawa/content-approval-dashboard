@@ -23,27 +23,27 @@ export const demoWorkspaces: Workspace[] = [{
 
 export const demoContent: ContentItem[] = [
   {
-    id: "demo-post-1", workspace_id: "demo-juniper", title: "A quieter kind of morning",
+    id: "demo-post-1", workspace_id: "demo-juniper", approval_batch_id: "demo-batch-1", title: "A quieter kind of morning",
     caption: "Slow starts create room for better ideas. This week, we’re making space for thoughtful details and a calmer rhythm.\n\n#JuniperStudio #SlowLiving #CreativePractice",
     media_url: "/demo/eucalyptus-vase.png", media_type: "image", channel: "All platforms",
     scheduled_for: "Sep 1, 2026 · 9:00 AM", status: "approved", position: 1,
     comments: [{ id: "demo-comment-1", content_id: "demo-post-1", author: "Maya", body: "Beautiful direction—ready to share.", created_at: "2026-08-29T16:20:00Z" }],
   },
   {
-    id: "demo-post-2", workspace_id: "demo-juniper", title: "Make room for the work",
+    id: "demo-post-2", workspace_id: "demo-juniper", approval_batch_id: "demo-batch-1", title: "Make room for the work",
     caption: "A clear desk, a warm cup, and one good idea at a time. What helps you settle into focused work?\n\n#JuniperStudio #StudioNotes #MindfulWork",
     media_url: "/demo/linen-notebook.png", media_type: "image", channel: "Instagram",
     scheduled_for: "Sep 3, 2026 · 9:00 AM", status: "pending", position: 2, comments: [],
   },
   {
-    id: "demo-post-3", workspace_id: "demo-juniper", title: "Follow the open path",
+    id: "demo-post-3", workspace_id: "demo-juniper", approval_batch_id: "demo-batch-1", title: "Follow the open path",
     caption: "A little distance can bring everything back into focus. Save this for the next day you need a reset.\n\n#JuniperStudio #CoastalCalm #WeekendReset",
     media_url: "/demo/coastal-path.png", media_type: "image", channel: "Facebook",
     scheduled_for: "Sep 5, 2026 · 9:00 AM", status: "changes_requested", position: 3,
     comments: [{ id: "demo-comment-2", content_id: "demo-post-3", author: "Client", body: "Could we make the opening line feel warmer?", created_at: "2026-08-30T10:10:00Z" }],
   },
   {
-    id: "demo-post-4", workspace_id: "demo-juniper", title: "An evening ritual",
+    id: "demo-post-4", workspace_id: "demo-juniper", approval_batch_id: "demo-batch-1", title: "An evening ritual",
     caption: "End the day gently: lower the lights, put the phone away, and let the room grow quiet.\n\n#JuniperStudio #EveningRitual #HomeNotes",
     media_url: "/demo/amber-candle.png", media_type: "image", channel: "All platforms",
     scheduled_for: "Sep 8, 2026 · 9:00 AM", status: "approved", position: 4, comments: [],

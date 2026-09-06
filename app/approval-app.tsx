@@ -28,6 +28,7 @@ import { prepareMediaForUpload } from "@/lib/video-compress";
 import { apiRequest, loadDashboard } from "@/lib/api-client";
 import SchedulerView from "@/app/scheduler/scheduler-view";
 import type {
+  ApprovalBatch,
   Comment,
   ContentItem,
   DashboardData,
@@ -68,18 +69,27 @@ function savedWorkspaceId() {
   return new URLSearchParams(window.location.search).get("workspace") || window.localStorage.getItem("approval-dashboard-workspace");
 }
 
+function savedBatchId() {
+  if (typeof window === "undefined") return null;
+  return new URLSearchParams(window.location.search).get("batch");
+}
+
 export default function ApprovalApp() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [batches, setBatches] = useState<ApprovalBatch[]>([]);
   const [items, setItems] = useState<ContentItem[]>([]);
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [view, setView] = useState<DashboardView>(savedDashboardView);
   const [selectedItems, setSelectedItems] = useState<string[]>([]);
   const [activeWorkspace, setActiveWorkspace] = useState<string | null>(savedWorkspaceId);
+  const [activeBatch, setActiveBatch] = useState<string | null>(savedBatchId);
   const [commentOpen, setCommentOpen] = useState<string | null>(null);
   const [replaceItem, setReplaceItem] = useState<ContentItem | null>(null);
   const [editItem, setEditItem] = useState<ContentItem | null>(null);
   const [deleteItem, setDeleteItem] = useState<ContentItem | null>(null);
   const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
+  const [newBatchOpen, setNewBatchOpen] = useState(false);
+  const [deleteBatch, setDeleteBatch] = useState<ApprovalBatch | null>(null);
   const [addContentOpen, setAddContentOpen] = useState(false);
   const [bulkUploadOpen, setBulkUploadOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -89,13 +99,21 @@ export default function ApprovalApp() {
   const refreshDashboard = useCallback(async () => {
     const data = await loadDashboard<DashboardData>();
     setWorkspaces(data.workspaces);
+    setBatches(data.batches);
     setItems(data.content);
     setQueue(data.queue);
-    setActiveWorkspace((current) =>
-      current && data.workspaces.some((workspace) => workspace.id === current)
-        ? current
-        : data.workspaces[0]?.id ?? null,
-    );
+    const requestedWorkspace = savedWorkspaceId();
+    const nextWorkspace = requestedWorkspace && data.workspaces.some((workspace) => workspace.id === requestedWorkspace)
+      ? requestedWorkspace
+      : data.workspaces[0]?.id ?? null;
+    setActiveWorkspace(nextWorkspace);
+    setActiveBatch((current) => {
+      if (current && data.batches.some((batch) => batch.id === current && batch.workspace_id === nextWorkspace)) return current;
+      const stored = nextWorkspace ? window.localStorage.getItem(`approval-dashboard-batch:${nextWorkspace}`) : null;
+      return data.batches.find((batch) => batch.id === stored && batch.workspace_id === nextWorkspace)?.id
+        ?? data.batches.find((batch) => batch.workspace_id === nextWorkspace)?.id
+        ?? null;
+    });
     setLoading(false);
   }, []);
 
@@ -111,18 +129,29 @@ export default function ApprovalApp() {
     const url = new URL(window.location.href);
     url.searchParams.set("view", view);
     url.searchParams.set("workspace", activeWorkspace);
+    if (activeBatch) {
+      window.localStorage.setItem(`approval-dashboard-batch:${activeWorkspace}`, activeBatch);
+      url.searchParams.set("batch", activeBatch);
+    } else {
+      url.searchParams.delete("batch");
+    }
     window.history.replaceState(null, "", `${url.pathname}?${url.searchParams.toString()}${url.hash}`);
-  }, [activeWorkspace, view]);
+  }, [activeBatch, activeWorkspace, view]);
 
   const active =
     workspaces.find((workspace) => workspace.id === activeWorkspace) ??
     workspaces[0];
+  const workspaceBatches = useMemo(
+    () => batches.filter((batch) => batch.workspace_id === activeWorkspace),
+    [activeWorkspace, batches],
+  );
+  const activeBatchRecord = workspaceBatches.find((batch) => batch.id === activeBatch);
   const visibleItems = useMemo(
     () =>
       items
-        .filter((item) => item.workspace_id === activeWorkspace)
+        .filter((item) => item.workspace_id === activeWorkspace && item.approval_batch_id === activeBatch)
         .sort((a, b) => a.position - b.position),
-    [items, activeWorkspace],
+    [items, activeBatch, activeWorkspace],
   );
   const approvedCount = visibleItems.filter(
     (item) => item.status === "approved",
@@ -214,12 +243,37 @@ export default function ApprovalApp() {
   }
 
   async function createWorkspace(name: string, color: string) {
-    const result = await apiRequest<{ workspace: Workspace }>("createWorkspace", { name, color });
+    const result = await apiRequest<{ workspace: Workspace; batch: ApprovalBatch }>("createWorkspace", { name, color });
     const workspace = result.workspace;
     setWorkspaces((current) => [...current, workspace]);
+    setBatches((current) => [result.batch, ...current]);
     setActiveWorkspace(workspace.id);
+    setActiveBatch(result.batch.id);
     setNewWorkspaceOpen(false);
     flash(`${name} workspace created`);
+  }
+
+  async function createApprovalBatch(name: string) {
+    if (!activeWorkspace) return;
+    const result = await apiRequest<{ batch: ApprovalBatch }>("createApprovalBatch", { workspaceId: activeWorkspace, name });
+    setBatches((current) => [result.batch, ...current]);
+    setActiveBatch(result.batch.id);
+    setSelectedItems([]);
+    setNewBatchOpen(false);
+    flash(`${result.batch.name} created`);
+  }
+
+  async function deleteApprovalBatch(batch: ApprovalBatch) {
+    if (!activeWorkspace) return;
+    await apiRequest("deleteApprovalBatch", { workspaceId: activeWorkspace, batchId: batch.id });
+    const remaining = workspaceBatches.filter((entry) => entry.id !== batch.id);
+    setBatches((current) => current.filter((entry) => entry.id !== batch.id));
+    setItems((current) => current.filter((entry) => entry.approval_batch_id !== batch.id));
+    setActiveBatch(remaining[0]?.id ?? null);
+    setSelectedItems([]);
+    setCommentOpen(null);
+    setDeleteBatch(null);
+    flash(`${batch.name} deleted`);
   }
 
   async function addContent(data: {
@@ -228,8 +282,8 @@ export default function ApprovalApp() {
     channel: string;
     file: File | null;
   }) {
-    if (!activeWorkspace) {
-      flash("Create a workspace before adding content");
+    if (!activeWorkspace || !activeBatch) {
+      flash("Create an approval batch before adding content");
       return;
     }
     const id = crypto.randomUUID();
@@ -240,6 +294,7 @@ export default function ApprovalApp() {
     const content: ContentItem = {
       id,
       workspace_id: activeWorkspace,
+      approval_batch_id: activeBatch,
       title: data.title.trim(),
       caption: data.caption.trim(),
       media_url: mediaUrl,
@@ -253,6 +308,7 @@ export default function ApprovalApp() {
     setItems((current) => [...current, content]);
     await apiRequest("addContent", {
       workspaceId: activeWorkspace,
+      batchId: activeBatch,
       item: content,
     });
     setAddContentOpen(false);
@@ -260,8 +316,8 @@ export default function ApprovalApp() {
   }
 
   async function addFolderContent(files: File[]) {
-    if (!activeWorkspace) {
-      flash("Create a workspace before adding content");
+    if (!activeWorkspace || !activeBatch) {
+      flash("Create an approval batch before adding content");
       return;
     }
 
@@ -272,6 +328,7 @@ export default function ApprovalApp() {
       drafts.push({
         id,
         workspace_id: activeWorkspace,
+        approval_batch_id: activeBatch,
         title: "",
         caption: "",
         media_url: mediaUrl,
@@ -286,6 +343,7 @@ export default function ApprovalApp() {
 
     await apiRequest("bulkAddContent", {
       workspaceId: activeWorkspace,
+      batchId: activeBatch,
       items: drafts,
     });
     setItems((current) => [...current, ...drafts]);
@@ -379,6 +437,12 @@ export default function ApprovalApp() {
               className={`workspace-button ${workspace.id === activeWorkspace ? "active" : ""}`}
               onClick={() => {
                 setActiveWorkspace(workspace.id);
+                const stored = window.localStorage.getItem(`approval-dashboard-batch:${workspace.id}`);
+                const nextBatch = batches.find((batch) => batch.id === stored && batch.workspace_id === workspace.id)
+                  ?? batches.find((batch) => batch.workspace_id === workspace.id);
+                setActiveBatch(nextBatch?.id ?? null);
+                setSelectedItems([]);
+                setCommentOpen(null);
                 setMobileMenu(false);
               }}
             >
@@ -458,14 +522,14 @@ export default function ApprovalApp() {
             </button>
             <button
               className="secondary-button bulk-button"
-              disabled={!active}
+              disabled={!active || !activeBatch}
               onClick={() => setBulkUploadOpen(true)}
             >
               <Upload size={17} /> Upload folder
             </button>
             <button
               className="primary-button"
-              disabled={!active}
+              disabled={!active || !activeBatch}
               onClick={() => setAddContentOpen(true)}
             >
               <Plus size={17} /> Add content
@@ -482,7 +546,7 @@ export default function ApprovalApp() {
             <div>
               <div className="eyebrow">CONTENT REVIEW</div>
               <h1>
-                {active?.name || "Your workspace"} <span>approval queue</span>
+                {active?.name || "Your workspace"} <span>approval batches</span>
               </h1>
               <p>
                 Review the media and caption together. Approve what’s ready or
@@ -508,8 +572,30 @@ export default function ApprovalApp() {
 
           <div className="batch-heading">
             <div>
-              <h2>Content batch</h2>
-              <p>{visibleItems.length} posts ready for review</p>
+              <div className="batch-picker-row">
+                <select
+                  className="batch-select"
+                  aria-label="Select approval batch"
+                  value={activeBatch ?? ""}
+                  onChange={(event) => {
+                    setActiveBatch(event.target.value || null);
+                    setSelectedItems([]);
+                    setCommentOpen(null);
+                  }}
+                >
+                  {!workspaceBatches.length && <option value="">No approval batches</option>}
+                  {workspaceBatches.map((batch) => <option key={batch.id} value={batch.id}>{batch.name}</option>)}
+                </select>
+                <button className="secondary-button" disabled={!active} onClick={() => setNewBatchOpen(true)}>
+                  <Plus size={15} /> New batch
+                </button>
+                {activeBatchRecord && (
+                  <button className="batch-delete-button" onClick={() => setDeleteBatch(activeBatchRecord)}>
+                    <Trash2 size={15} /> Delete batch
+                  </button>
+                )}
+              </div>
+              <p>{activeBatchRecord ? `${visibleItems.length} posts ready for review` : "Create a batch to begin"}</p>
             </div>
             <div className="approval-batch-actions">
               {selectedItems.length > 0 && (
@@ -543,11 +629,20 @@ export default function ApprovalApp() {
                 Create workspace
               </button>
             </div>
+          ) : !activeBatchRecord ? (
+            <div className="empty-state">
+              <CirclePlus size={28} />
+              <h3>Create an approval batch</h3>
+              <p>Each batch keeps its content and feedback separate inside this workspace.</p>
+              <button className="primary-button" onClick={() => setNewBatchOpen(true)}>
+                Create batch
+              </button>
+            </div>
           ) : visibleItems.length === 0 ? (
             <div className="empty-state">
               <ImagePlus size={28} />
-              <h3>No content in this workspace yet</h3>
-              <p>Add the first image or video to start a review batch.</p>
+              <h3>No content in {activeBatchRecord.name} yet</h3>
+              <p>Add the first image or video to this approval batch.</p>
               <button
                 className="primary-button"
                 onClick={() => setAddContentOpen(true)}
@@ -629,6 +724,21 @@ export default function ApprovalApp() {
         <WorkspaceModal
           onClose={() => setNewWorkspaceOpen(false)}
           onCreate={createWorkspace}
+        />
+      )}
+      {newBatchOpen && (
+        <ApprovalBatchModal
+          nextNumber={workspaceBatches.length + 1}
+          onClose={() => setNewBatchOpen(false)}
+          onCreate={createApprovalBatch}
+        />
+      )}
+      {deleteBatch && (
+        <DeleteBatchModal
+          batch={deleteBatch}
+          postCount={items.filter((item) => item.approval_batch_id === deleteBatch.id).length}
+          onClose={() => setDeleteBatch(null)}
+          onDelete={deleteApprovalBatch}
         />
       )}
       {addContentOpen && (
@@ -992,6 +1102,108 @@ function WorkspaceModal({
           </button>
         </div>
       </form>
+    </ModalShell>
+  );
+}
+
+function ApprovalBatchModal({
+  nextNumber,
+  onClose,
+  onCreate,
+}: {
+  nextNumber: number;
+  onClose: () => void;
+  onCreate: (name: string) => Promise<void>;
+}) {
+  const [name, setName] = useState(`Batch ${nextNumber}`);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  return (
+    <ModalShell
+      title="Create an approval batch"
+      subtitle="The new batch will be kept separately from your previous reviews."
+      onClose={onClose}
+    >
+      <form
+        className="modal-body form-stack"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          if (!name.trim()) return;
+          setSaving(true);
+          setError("");
+          try {
+            await onCreate(name.trim());
+          } catch (reason) {
+            setError(reason instanceof Error ? reason.message : "Could not create this batch.");
+            setSaving(false);
+          }
+        }}
+      >
+        <label>
+          Batch name
+          <input
+            maxLength={80}
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="e.g. September campaign"
+          />
+        </label>
+        {error && <p className="form-error">{error}</p>}
+        <div className="modal-actions">
+          <button type="button" className="secondary-button" onClick={onClose}>Cancel</button>
+          <button className="primary-button" disabled={!name.trim() || saving}>
+            {saving ? "Creating…" : "Create batch"}
+          </button>
+        </div>
+      </form>
+    </ModalShell>
+  );
+}
+
+function DeleteBatchModal({
+  batch,
+  postCount,
+  onClose,
+  onDelete,
+}: {
+  batch: ApprovalBatch;
+  postCount: number;
+  onClose: () => void;
+  onDelete: (batch: ApprovalBatch) => Promise<void>;
+}) {
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState("");
+  return (
+    <ModalShell
+      title={`Delete ${batch.name}?`}
+      subtitle="This permanently removes the whole approval batch."
+      onClose={onClose}
+    >
+      <div className="modal-body delete-confirm">
+        <p>
+          This will delete <strong>{postCount} approval post{postCount === 1 ? "" : "s"}</strong>, including their comments and review status. Copies already moved to the scheduling queue will stay there.
+        </p>
+        {error && <p className="form-error">{error}</p>}
+        <div className="modal-actions">
+          <button className="secondary-button" onClick={onClose}>Keep batch</button>
+          <button
+            className="danger-button"
+            disabled={deleting}
+            onClick={async () => {
+              setDeleting(true);
+              setError("");
+              try {
+                await onDelete(batch);
+              } catch (reason) {
+                setError(reason instanceof Error ? reason.message : "Could not delete this batch.");
+                setDeleting(false);
+              }
+            }}
+          >
+            {deleting ? "Deleting…" : "Yes, delete batch"}
+          </button>
+        </div>
+      </div>
     </ModalShell>
   );
 }
