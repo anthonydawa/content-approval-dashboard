@@ -30,7 +30,11 @@ create table if not exists public.content_items (
   scheduled_for text not null default 'Not scheduled',
   status text not null default 'pending' check (status in ('pending', 'approved', 'changes_requested')),
   position integer not null default 0,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  constraint content_items_reject_short_clip_assets check (
+    media_url not like
+      'https://pub-156571d06bfe4e518270c38985267577.r2.dev/users/test_user_actual/jobs/%/clips/%'
+  )
 );
 
 create table if not exists public.comments (
@@ -80,7 +84,11 @@ create table if not exists public.schedule_queue (
   secondary_sent_to_zernio_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  unique (workspace_id, source_content_id)
+  unique (workspace_id, source_content_id),
+  constraint schedule_queue_reject_short_clip_assets check (
+    media_url not like
+      'https://pub-156571d06bfe4e518270c38985267577.r2.dev/users/test_user_actual/jobs/%/clips/%'
+  )
 );
 
 create index if not exists content_items_workspace_id_idx on public.content_items(workspace_id);
