@@ -476,6 +476,10 @@ export async function POST(request: Request) {
     if (action === "syncZernio") {
       const workspaceId = id(body.workspaceId, "workspace ID");
       const queueIds = ids(body.queueIds, 250);
+      const requestedSlots = Array.isArray(body.slots)
+        ? body.slots.filter((slot): slot is "primary" | "secondary" => slot === "primary" || slot === "secondary")
+        : ["primary", "secondary"] as Array<"primary" | "secondary">;
+      if (!requestedSlots.length) throw new Error("Choose at least one Zernio connection.");
       const { data: workspace, error: workspaceError } = await supabase.from("workspaces")
         .select("timezone,zernio_api_key_encrypted,zernio_accounts,zernio_secondary_api_key_encrypted,zernio_secondary_accounts,pinterest_board_id").eq("id", workspaceId).single();
       if (workspaceError) throw workspaceError;
@@ -510,6 +514,7 @@ export async function POST(request: Request) {
         ].filter(Boolean) as Array<{ slot: "primary" | "secondary"; apiKey: string; accounts: ZernioAccount[]; allowedPlatforms: string[]; state: string; postId: string | null; status: string | null; requestId: string }>;
 
         for (const delivery of deliveries) {
+          if (!requestedSlots.includes(delivery.slot)) continue;
           const channel = item.channel.toLowerCase();
           const requestedPlatform = [...PRIMARY_PLATFORMS, ...SECONDARY_PLATFORMS].find((platform) => channel.includes(platform));
           const targets = delivery.accounts.filter((account) => delivery.allowedPlatforms.includes(account.platform.toLowerCase()));
