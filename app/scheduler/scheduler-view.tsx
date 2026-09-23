@@ -110,6 +110,20 @@ function deliveryStates(item: QueueItem, workspace: Workspace) {
   return states;
 }
 
+const PLATFORM_MARK: Record<string, string> = {
+  facebook: "f",
+  instagram: "◎",
+  linkedin: "in",
+  pinterest: "P",
+};
+
+function calendarPlatforms(item: QueueItem, workspace: Workspace) {
+  const selected = requestedPlatforms(item.channel);
+  return [...new Set([...workspace.zernio_accounts, ...workspace.zernio_secondary_accounts]
+    .map((account) => account.platform.toLowerCase())
+    .filter((platform) => PLATFORM_MARK[platform] && (!selected || selected.includes(platform))))];
+}
+
 function overallSyncState(item: QueueItem, workspace: Workspace): QueueSyncState {
   const states = deliveryStates(item, workspace);
   if (states.some((entry) => entry.state === "error")) return "error";
@@ -488,6 +502,11 @@ function CalendarGrid({ monthItems, workspace, timezone, busy, onMove, onPublish
                     <strong>{new Date(item.scheduled_at!).toLocaleTimeString("en", { timeZone: timezone, hour: "numeric", minute: "2-digit" })}</strong>
                     <span>{queueTitle(item)}</span>
                     <small>{syncLabel(item, workspace)}</small>
+                    <div className="calendar-platform-icons" aria-label={`Sending to ${calendarPlatforms(item, workspace).join(", ") || "configured platforms"}`}>
+                      {calendarPlatforms(item, workspace).map((platform) => (
+                        <i key={platform} className={`platform-icon platform-${platform}`} title={platform}>{PLATFORM_MARK[platform]}</i>
+                      ))}
+                    </div>
                     <div className="calendar-deliveries">{deliveryStates(item, workspace).map((delivery) => <i key={delivery.label} className={`sync-${delivery.state}`}>{delivery.label}</i>)}</div>
                     {!(item.zernio_status === "published" && item.secondary_zernio_status === "published") && (state === "error" || canSendNow) && (
                       <button

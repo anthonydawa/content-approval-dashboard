@@ -436,6 +436,60 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: true, postIds });
     }
 
+    if (action === "recoverLinkedIn") {
+      const workspaceId = id(body.workspaceId, "workspace ID");
+      const sourceQueueId = id(body.sourceQueueId, "source queue ID");
+      const publishNow = body.publishNow === true;
+      const scheduledAt = publishNow ? null : text(body.scheduledAt, 40);
+      if (!publishNow && (!scheduledAt || Number.isNaN(Date.parse(scheduledAt)))) {
+        throw new Error("Choose a valid future LinkedIn recovery time.");
+      }
+      if (scheduledAt && new Date(scheduledAt).getTime() <= Date.now()) {
+        throw new Error("Choose a LinkedIn recovery time in the future.");
+      }
+      const { data: workspace, error: workspaceError } = await supabase.from("workspaces")
+        .select("timezone,zernio_secondary_api_key_encrypted,zernio_secondary_accounts").eq("id", workspaceId).single();
+      if (workspaceError) throw workspaceError;
+      if (!workspace.zernio_secondary_api_key_encrypted) throw new Error("Connect the LinkedIn / Pinterest Zernio key first.");
+      const secondaryAccounts = (workspace.zernio_secondary_accounts ?? []) as ZernioAccount[];
+      if (!secondaryAccounts.some((account) => account.platform.toLowerCase() === "linkedin")) {
+        throw new Error("No LinkedIn account is selected for this workspace.");
+      }
+      const { data: source, error: sourceError } = await supabase.from("schedule_queue")
+        .select("*").eq("id", sourceQueueId).eq("workspace_id", workspaceId).single();
+      if (sourceError) throw sourceError;
+      if (source.zernio_status !== "published") throw new Error("Only an already-published Facebook / Instagram post can be recovered to LinkedIn.");
+      const recovery = {
+        id: randomUUID(), workspace_id: workspaceId, source_content_id: null,
+        title: source.title, caption: source.caption, media_url: source.media_url, media_type: source.media_type,
+        channel: "LinkedIn", scheduled_at: scheduledAt ? new Date(scheduledAt).toISOString() : null,
+        zernio_request_id: randomUUID(), secondary_zernio_request_id: randomUUID(),
+      };
+      const { error: insertError } = await supabase.from("schedule_queue").insert(recovery);
+      if (insertError) throw insertError;
+      const recoveryItem = recovery as QueueItem;
+      try {
+        const apiKey = decryptSecret(workspace.zernio_secondary_api_key_encrypted);
+        const result = publishNow
+          ? await publishZernioPost(apiKey, recoveryItem, secondaryAccounts, workspace.timezone || DEFAULT_TIMEZONE, { allowedPlatforms: ["linkedin"] })
+          : await syncZernioPost(apiKey, recoveryItem, secondaryAccounts, workspace.timezone || DEFAULT_TIMEZONE, { allowedPlatforms: ["linkedin"] });
+        const post = (result as { post?: { _id?: string; status?: string }; existingPost?: { _id?: string; status?: string } }).post
+          ?? (result as { existingPost?: { _id?: string; status?: string } }).existingPost;
+        if (!post?._id) throw new Error("Zernio did not return a LinkedIn post ID.");
+        const { error: updateError } = await supabase.from("schedule_queue").update({
+          secondary_sync_state: "synced", secondary_zernio_post_id: post._id,
+          secondary_zernio_status: post.status ?? (publishNow ? "published" : "scheduled"),
+          secondary_sent_to_zernio_at: new Date().toISOString(),
+        }).eq("id", recovery.id);
+        if (updateError) throw updateError;
+        return NextResponse.json({ ok: true, recoveryId: recovery.id, postId: post._id, status: post.status ?? (publishNow ? "published" : "scheduled") });
+      } catch (reason) {
+        const message = reason instanceof Error ? reason.message : "LinkedIn recovery failed.";
+        await supabase.from("schedule_queue").update({ secondary_sync_state: "error", secondary_zernio_last_error: message.slice(0, 1000) }).eq("id", recovery.id);
+        throw reason;
+      }
+    }
+
     if (action === "saveZernioConfig") {
       const workspaceId = id(body.workspaceId, "workspace ID");
       const suppliedPrimaryKey = text(body.primaryApiKey, 200);
