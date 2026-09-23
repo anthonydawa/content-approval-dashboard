@@ -1408,6 +1408,8 @@ function EditContentModal({
             onChange={(event) => setChannel(event.target.value)}
           >
             <option value="All platforms">All connected platforms</option>
+            <option>Facebook &amp; Instagram</option>
+            <option>LinkedIn &amp; Pinterest</option>
             <option>Instagram</option>
             <option>Instagram Reel</option>
             <option>Facebook</option>
@@ -1575,6 +1577,8 @@ function AddContentModal({
             onChange={(event) => setChannel(event.target.value)}
           >
             <option value="All platforms">All connected platforms</option>
+            <option>Facebook &amp; Instagram</option>
+            <option>LinkedIn &amp; Pinterest</option>
             <option>Instagram</option>
             <option>Instagram Reel</option>
             <option>Facebook</option>
