@@ -79,17 +79,12 @@ export async function listPinterestBoards(apiKey: string, accountId: string) {
     .filter((board) => board.id);
 }
 
-function channelPlatform(channel: string) {
+function channelPlatforms(channel: string) {
   const value = channel.toLowerCase();
-  if (value.includes("instagram")) return "instagram";
-  if (value.includes("facebook")) return "facebook";
-  if (value.includes("linkedin")) return "linkedin";
-  if (value.includes("tiktok")) return "tiktok";
-  if (value.includes("youtube")) return "youtube";
-  if (value.includes("twitter") || value === "x") return "twitter";
-  if (value.includes("threads")) return "threads";
-  if (value.includes("pinterest")) return "pinterest";
-  return null;
+  if (value.includes("all platform")) return null;
+  const platforms = ["instagram", "facebook", "linkedin", "tiktok", "youtube", "twitter", "threads", "pinterest"]
+    .filter((platform) => value.includes(platform));
+  return platforms.length ? platforms : null;
 }
 
 function scheduledFor(value: string, timezone: string) {
@@ -121,13 +116,13 @@ function postBody(item: QueueItem, accounts: ZernioAccount[], timezone: string, 
   if (!immediate && item.scheduled_at && new Date(item.scheduled_at).getTime() <= Date.now()) {
     throw new Error("The scheduled time must be in the future.");
   }
-  const platform = channelPlatform(item.channel);
+  const platforms = channelPlatforms(item.channel);
   const allowed = allowedPlatforms?.map((entry) => entry.toLowerCase());
   const eligible = allowed?.length
     ? accounts.filter((account) => allowed.includes(account.platform.toLowerCase()))
     : accounts;
-  const targets = platform
-    ? eligible.filter((account) => account.platform.toLowerCase() === platform)
+  const targets = platforms
+    ? eligible.filter((account) => platforms.includes(account.platform.toLowerCase()))
     : eligible;
   if (!targets.length) {
     throw new Error(`No connected Zernio account matches ${item.channel}.`);

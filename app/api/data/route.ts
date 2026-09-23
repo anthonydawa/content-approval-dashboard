@@ -91,9 +91,12 @@ function accountId(value: string | { _id?: string; id?: string } | undefined) {
   return value?._id ?? value?.id ?? "";
 }
 
-function requestedPlatform(channel: string) {
+function requestedPlatforms(channel: string) {
   const normalized = channel.toLowerCase();
-  return [...PRIMARY_PLATFORMS, ...SECONDARY_PLATFORMS].find((platform) => normalized.includes(platform)) ?? null;
+  if (normalized.includes("all platform")) return null;
+  const platforms = [...PRIMARY_PLATFORMS, ...SECONDARY_PLATFORMS]
+    .filter((platform) => normalized.includes(platform));
+  return platforms.length ? platforms : null;
 }
 
 function scheduleFingerprint(value: string | undefined) {
@@ -516,10 +519,12 @@ export async function POST(request: Request) {
         for (const delivery of deliveries) {
           if (!requestedSlots.includes(delivery.slot)) continue;
           const channel = item.channel.toLowerCase();
-          const requestedPlatform = [...PRIMARY_PLATFORMS, ...SECONDARY_PLATFORMS].find((platform) => channel.includes(platform));
+          const requestedPlatforms = channel.includes("all platform")
+            ? null
+            : [...PRIMARY_PLATFORMS, ...SECONDARY_PLATFORMS].filter((platform) => channel.includes(platform));
           const targets = delivery.accounts.filter((account) => delivery.allowedPlatforms.includes(account.platform.toLowerCase()));
-          const applies = requestedPlatform
-            ? targets.some((account) => account.platform.toLowerCase() === requestedPlatform)
+          const applies = requestedPlatforms?.length
+            ? targets.some((account) => requestedPlatforms.includes(account.platform.toLowerCase()))
             : targets.length > 0;
           if (!applies || delivery.state === "synced") continue;
           try {
@@ -631,11 +636,11 @@ export async function POST(request: Request) {
       const auditedDeliveries: Array<Record<string, unknown>> = [];
 
       for (const item of (queueRows ?? []) as QueueItem[]) {
-        const platform = requestedPlatform(item.channel);
+        const platforms = requestedPlatforms(item.channel);
         for (const { connection, result } of listed) {
           const eligibleAccounts = connection.accounts.filter((entry) => connection.allowedPlatforms.includes(entry.platform.toLowerCase()));
-          const expectedAccounts = platform
-            ? eligibleAccounts.filter((entry) => entry.platform.toLowerCase() === platform)
+          const expectedAccounts = platforms
+            ? eligibleAccounts.filter((entry) => platforms.includes(entry.platform.toLowerCase()))
             : eligibleAccounts;
           if (!expectedAccounts.length) continue;
           const postId = connection.slot === "primary" ? item.zernio_post_id : item.secondary_zernio_post_id;

@@ -86,14 +86,16 @@ function calendarDays(month: Date) {
   });
 }
 
-function requestedPlatform(channel: string) {
+function requestedPlatforms(channel: string) {
   const value = channel.toLowerCase();
-  return ["facebook", "instagram", "linkedin", "pinterest"].find((platform) => value.includes(platform)) ?? null;
+  if (value.includes("all platform")) return null;
+  const platforms = ["facebook", "instagram", "linkedin", "pinterest"].filter((platform) => value.includes(platform));
+  return platforms.length ? platforms : null;
 }
 
 function connectionApplies(channel: string, accounts: ZernioAccount[]) {
-  const requested = requestedPlatform(channel);
-  return requested ? accounts.some((account) => account.platform.toLowerCase() === requested) : accounts.length > 0;
+  const requested = requestedPlatforms(channel);
+  return requested ? accounts.some((account) => requested.includes(account.platform.toLowerCase())) : accounts.length > 0;
 }
 
 function deliveryStates(item: QueueItem, workspace: Workspace) {
@@ -167,9 +169,20 @@ export default function SchedulerView({ mode, workspace, queue, onChanged, flash
 
   async function saveSchedule(item: QueueItem, value: string) {
     if (!value) return;
-    await apiRequest("updateQueueSchedule", { id: item.id, scheduledAt: workspaceDateTimeToIso(value, workspace.timezone || DEFAULT_TIMEZONE) });
-    await onChanged();
-    flash(item.zernio_post_id || item.secondary_zernio_post_id ? "Schedule changed — resend it to Zernio when ready" : "Schedule saved");
+    try {
+      await apiRequest("updateQueueSchedule", { id: item.id, scheduledAt: workspaceDateTimeToIso(value, workspace.timezone || DEFAULT_TIMEZONE) });
+      const result = await apiRequest<{ results: Array<{ ok: boolean; error?: string }> }>("syncZernio", {
+        workspaceId: workspace.id,
+        queueIds: [item.id],
+      });
+      const outcome = result.results[0];
+      if (!outcome?.ok) throw new Error(outcome?.error || "Zernio scheduling failed.");
+      await onChanged();
+      flash("Scheduled on every selected platform");
+    } catch (reason) {
+      await onChanged();
+      flash(reason instanceof Error ? reason.message : "The date was saved, but Zernio could not schedule it.");
+    }
   }
 
   async function syncAll() {
@@ -551,7 +564,13 @@ function AutoQueueModal({ workspace, queue, onClose, onChanged, flash }: {
         if (!unscheduled.length) throw new Error("Every queued post already has a date.");
         const generated = makeAssignments();
         await apiRequest("autoSchedule", { workspaceId: workspace.id, ...generated });
-        await onChanged(); onClose(); flash(`${generated.assignments.length} posts added to the calendar`);
+        const result = await apiRequest<{ results: Array<{ ok: boolean; error?: string }> }>("syncZernio", {
+          workspaceId: workspace.id,
+          queueIds: generated.assignments.map((assignment) => assignment.id),
+        });
+        const failed = result.results.find((entry) => !entry.ok);
+        if (failed) throw new Error(failed.error || "One or more posts could not be sent to Zernio.");
+        await onChanged(); onClose(); flash(`${generated.assignments.length} posts added to the calendar and sent to all selected platforms`);
       } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not auto queue."); }
       finally { setSaving(false); }
     }}>
