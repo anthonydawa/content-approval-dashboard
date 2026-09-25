@@ -490,6 +490,80 @@ export async function POST(request: Request) {
       }
     }
 
+    if (action === "recoverSecondary") {
+      const workspaceId = id(body.workspaceId, "workspace ID");
+      const sourceQueueId = id(body.sourceQueueId, "source queue ID");
+      const publishNow = body.publishNow === true;
+      const scheduledAt = publishNow ? null : text(body.scheduledAt, 40);
+      if (!publishNow && (!scheduledAt || Number.isNaN(Date.parse(scheduledAt)))) {
+        throw new Error("Choose a valid future LinkedIn / Pinterest recovery time.");
+      }
+      if (scheduledAt && new Date(scheduledAt).getTime() <= Date.now()) {
+        throw new Error("Choose a LinkedIn / Pinterest recovery time in the future.");
+      }
+      const requested = Array.isArray(body.platforms)
+        ? [...new Set(body.platforms.filter((platform): platform is string => platform === "linkedin" || platform === "pinterest"))]
+        : SECONDARY_PLATFORMS;
+      if (!requested.length) throw new Error("Select LinkedIn, Pinterest, or both.");
+      const { data: workspace, error: workspaceError } = await supabase.from("workspaces")
+        .select("timezone,zernio_secondary_api_key_encrypted,zernio_secondary_accounts,pinterest_board_id").eq("id", workspaceId).single();
+      if (workspaceError) throw workspaceError;
+      if (!workspace.zernio_secondary_api_key_encrypted) throw new Error("Connect the LinkedIn / Pinterest Zernio key first.");
+      const secondaryAccounts = ((workspace.zernio_secondary_accounts ?? []) as ZernioAccount[])
+        .filter((account) => requested.includes(account.platform.toLowerCase()));
+      const missing = requested.filter((platform) => !secondaryAccounts.some((account) => account.platform.toLowerCase() === platform));
+      if (missing.length) throw new Error(`No connected Zernio account selected for ${missing.join(" and ")}.`);
+      if (requested.includes("pinterest") && !workspace.pinterest_board_id) throw new Error("Choose a default Pinterest board in Zernio settings.");
+      const { data: source, error: sourceError } = await supabase.from("schedule_queue")
+        .select("*").eq("id", sourceQueueId).eq("workspace_id", workspaceId).single();
+      if (sourceError) throw sourceError;
+      if (!source.caption && !source.media_url) throw new Error("This calendar item has no caption or media to recover.");
+      const recovery = {
+        id: randomUUID(), workspace_id: workspaceId, source_content_id: null,
+        title: source.title, caption: source.caption, media_url: source.media_url, media_type: source.media_type,
+        channel: requested.map((platform) => platform === "linkedin" ? "LinkedIn" : "Pinterest").join(" & "),
+        scheduled_at: scheduledAt ? new Date(scheduledAt).toISOString() : null,
+        zernio_request_id: randomUUID(), secondary_zernio_request_id: randomUUID(),
+      };
+      const apiKey = decryptSecret(workspace.zernio_secondary_api_key_encrypted);
+      const dateFrom = new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 10);
+      const existing = await listZernioPosts(apiKey, dateFrom);
+      const mediaFingerprint = (media: Array<{ url?: string; type?: string }> | undefined) =>
+        (media ?? []).map((entry) => `${entry.type ?? ""}:${entry.url ?? ""}`).sort().join("|");
+      const targetAccounts = new Set(secondaryAccounts.map((account) => `${account.platform.toLowerCase()}:${account.id}`));
+      const duplicate = (existing.posts ?? []).find((post) => {
+        if (post.content !== source.caption || mediaFingerprint(post.mediaItems) !== mediaFingerprint(source.media_url ? [{ url: source.media_url, type: source.media_type }] : [])) return false;
+        const postTargets = new Set((post.platforms ?? []).map((entry) => `${String(entry.platform ?? "").toLowerCase()}:${accountId(entry.accountId)}`));
+        return targetAccounts.size === postTargets.size && [...targetAccounts].every((target) => postTargets.has(target));
+      });
+      if (duplicate) throw new Error(`This content already exists on the selected LinkedIn / Pinterest account${requested.length > 1 ? "s" : ""} in Zernio (${duplicate.status ?? "already sent"}).`);
+      const { error: insertError } = await supabase.from("schedule_queue").insert(recovery);
+      if (insertError) throw insertError;
+      try {
+        const result = publishNow
+          ? await publishZernioPost(apiKey, recovery as QueueItem, secondaryAccounts, workspace.timezone || DEFAULT_TIMEZONE, {
+              allowedPlatforms: requested, pinterestBoardId: workspace.pinterest_board_id,
+            })
+          : await syncZernioPost(apiKey, recovery as QueueItem, secondaryAccounts, workspace.timezone || DEFAULT_TIMEZONE, {
+              allowedPlatforms: requested, pinterestBoardId: workspace.pinterest_board_id,
+            });
+        const post = (result as { post?: { _id?: string; status?: string }; existingPost?: { _id?: string; status?: string } }).post
+          ?? (result as { existingPost?: { _id?: string; status?: string } }).existingPost;
+        if (!post?._id) throw new Error("Zernio did not return a LinkedIn / Pinterest post ID.");
+        const { error: updateError } = await supabase.from("schedule_queue").update({
+          secondary_sync_state: "synced", secondary_zernio_post_id: post._id,
+          secondary_zernio_status: post.status ?? (publishNow ? "published" : "scheduled"),
+          secondary_zernio_last_error: null, secondary_sent_to_zernio_at: new Date().toISOString(),
+        }).eq("id", recovery.id);
+        if (updateError) throw updateError;
+        return NextResponse.json({ ok: true, recoveryId: recovery.id, postId: post._id, status: post.status ?? (publishNow ? "published" : "scheduled"), platforms: requested });
+      } catch (reason) {
+        const message = reason instanceof Error ? reason.message : "LinkedIn / Pinterest recovery failed.";
+        await supabase.from("schedule_queue").update({ secondary_sync_state: "error", secondary_zernio_last_error: message.slice(0, 1000) }).eq("id", recovery.id);
+        throw reason;
+      }
+    }
+
     if (action === "saveZernioConfig") {
       const workspaceId = id(body.workspaceId, "workspace ID");
       const suppliedPrimaryKey = text(body.primaryApiKey, 200);
